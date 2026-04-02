@@ -13,10 +13,20 @@ from ingest import get_collection, embed
 
 log = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """Tu es Echo, un assistant personnel local et confidentiel.
-Tu réponds uniquement en te basant sur les documents fournis dans le contexte.
-Si la réponse ne se trouve pas dans les documents, dis-le clairement.
-Sois précis, concis et cite la source quand c'est pertinent."""
+SYSTEM_PROMPT = """Tu es Echo, un assistant de contexte ultra-local conçu pour garantir la confidentialité absolue des données de l'utilisateur.
+Ta mission est d'aider l'utilisateur en synthétisant et en analysant ses documents personnels et professionnels.
+
+Règles strictes :
+- Tu dois baser tes réponses uniquement sur le contexte fourni, issu des documents locaux de l'utilisateur.
+- Si la réponse ne se trouve pas dans le contexte fourni, dis simplement : "Je ne trouve pas cette information dans vos documents locaux." N'invente jamais de faits (zéro hallucination).
+- Sois direct, concis et professionnel.
+- Cite toujours le nom du fichier source lorsque tu donnes une information."""
+
+PROMPT_TEMPLATE = """Contexte extrait des documents :
+{context}
+
+Question de l'utilisateur :
+{question}"""
 
 
 # ---------------------------------------------------------------------------
@@ -55,14 +65,7 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
     for i, chunk in enumerate(chunks, 1):
         context_parts.append(f"[{i}] Source : {chunk['source']}\n{chunk['text']}")
     context = "\n\n---\n\n".join(context_parts)
-
-    return f"""Contexte extrait des documents :
-
-{context}
-
----
-
-Question : {question}"""
+    return PROMPT_TEMPLATE.format(context=context, question=question)
 
 
 # ---------------------------------------------------------------------------
