@@ -94,13 +94,16 @@ export async function checkOllamaStatus(): Promise<OllamaStatus> {
       };
     }
     return res.json() as Promise<OllamaStatus>;
-  } catch (err) {
+  } catch {
+    // Le backend Echo lui-même n'est pas accessible (sidecar non démarré,
+    // ou mode dev sans uvicorn). On utilise un code d'erreur spécial
+    // pour que l'OllamaGate affiche le bon message.
     return {
       ollama_running: false,
       model: "—",
       model_available: false,
       available_models: [],
-      error: err instanceof Error ? err.message : "Erreur réseau",
+      error: "BACKEND_UNREACHABLE",
     };
   }
 }

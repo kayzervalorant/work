@@ -13,7 +13,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { checkOllamaStatus, pullModel, openExternalUrl } from "../api/backend";
 import type { OllamaStatus, PullEvent } from "../types";
 
-type GateState = "checking" | "no_ollama" | "no_model" | "pulling" | "ready";
+type GateState = "checking" | "backend_down" | "no_ollama" | "no_model" | "pulling" | "ready";
 
 interface OllamaGateProps {
   children: React.ReactNode;
@@ -31,7 +31,9 @@ export default function OllamaGate({ children }: OllamaGateProps) {
     const status = await checkOllamaStatus();
     setOllamaInfo(status);
 
-    if (!status.ollama_running) {
+    if (status.error === "BACKEND_UNREACHABLE") {
+      setState("backend_down");
+    } else if (!status.ollama_running) {
       setState("no_ollama");
     } else if (!status.model_available) {
       setState("no_model");
@@ -89,6 +91,7 @@ export default function OllamaGate({ children }: OllamaGateProps) {
         </div>
 
         {state === "checking" && <CheckingView />}
+        {state === "backend_down" && <BackendDownView onRetry={check} />}
         {state === "no_ollama" && (
           <NoOllamaView onRetry={check} />
         )}
@@ -132,6 +135,51 @@ function CheckingView() {
           />
         ))}
       </div>
+    </>
+  );
+}
+
+function BackendDownView({ onRetry }: { onRetry: () => void }) {
+  return (
+    <>
+      <div className="w-12 h-12 rounded-full bg-status-loading/10 border border-status-loading/30 flex items-center justify-center">
+        <IconSpinner />
+      </div>
+
+      <div>
+        <h1 className="text-lg font-semibold text-text-primary">
+          Serveur Echo non démarré
+        </h1>
+        <p className="text-sm text-text-muted mt-2 leading-relaxed max-w-sm">
+          Le backend local d'Echo (port 8000) n'est pas accessible.
+          En mode développement, tu dois le lancer manuellement.
+        </p>
+      </div>
+
+      <div className="w-full space-y-2 text-left bg-surface-2 border border-border rounded-xl p-4">
+        <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
+          Démarrer le backend (terminal)
+        </p>
+        <code className="block text-xs font-mono text-accent bg-surface-base rounded-lg px-3 py-2 leading-relaxed">
+          cd echo/backend<br />
+          pip install -r requirements.txt<br />
+          uvicorn main:app --port 8000 --reload
+        </code>
+        <p className="text-[11px] text-text-muted pt-1">
+          Dans l'app distribuée (.dmg), le serveur démarre automatiquement.
+        </p>
+      </div>
+
+      <button
+        onClick={onRetry}
+        className="
+          w-full px-4 py-2.5 rounded-lg
+          bg-accent text-surface-base font-semibold text-sm
+          hover:bg-accent-dim transition-colors
+        "
+      >
+        Réessayer la connexion
+      </button>
     </>
   );
 }
@@ -359,6 +407,17 @@ function EchoLogo({ size = 22 }: { size?: number }) {
       <circle cx="11" cy="11" r="10" stroke="#22d3ee" strokeWidth="1.5" />
       <circle cx="11" cy="11" r="5.5" stroke="#22d3ee" strokeWidth="1" strokeOpacity="0.5" />
       <circle cx="11" cy="11" r="2" fill="#22d3ee" />
+    </svg>
+  );
+}
+
+function IconSpinner() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="#fbbf24" strokeWidth="1.5" strokeLinecap="round">
+      <circle cx="11" cy="11" r="9" strokeOpacity="0.25" />
+      <path d="M11 2a9 9 0 019 9">
+        <animateTransform attributeName="transform" type="rotate" from="0 11 11" to="360 11 11" dur="1s" repeatCount="indefinite" />
+      </path>
     </svg>
   );
 }
