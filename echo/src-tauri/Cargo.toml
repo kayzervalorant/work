@@ -1,0 +1,27 @@
+[package]
+name = "echo"
+version = "0.1.0"
+description = "Echo — Assistant IA local privacy-first"
+authors = []
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.6", features = [
+  "dialog-open",
+  "http-request",
+  "shell-open"
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# by default Tauri runs in production mode
+# when `tauri dev` runs it is executed with `cargo build --no-default-features`
+# the dev server is started with `npm run dev` and the `devPath` is set to the dev server URL
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
