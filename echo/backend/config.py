@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+# Charge le fichier .env présent dans le même dossier (silencieux si absent)
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 # Paths
 DOCS_DIR = os.getenv("ECHO_DOCS_DIR", "./docs")
@@ -18,3 +22,10 @@ OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 # Retrieval
 TOP_K = 5               # number of chunks to retrieve
+
+# CORS — origines autorisées séparées par des virgules
+_raw_origins = os.getenv(
+    "ECHO_CORS_ORIGINS",
+    "http://localhost:1420,http://localhost:5173",
+)
+CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]

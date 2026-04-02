@@ -1,0 +1,27 @@
+# Dépendances
+node_modules/
+dist/
+dist-ssr/
+
+# Variables d'environnement — NE JAMAIS COMMITTER
+.env
+backend/.env
+
+# Build Tauri
+src-tauri/target/
+
+# ChromaDB (base vectorielle locale)
+chroma_db/
+
+# Logs Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Vite
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db
