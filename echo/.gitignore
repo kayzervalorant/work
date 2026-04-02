@@ -19,6 +19,14 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
+# Venv de build (créé par build-mac.sh)
+.venv-build/
+
+# Binaires sidecar générés (ne pas committer — gros fichiers)
+src-tauri/binaries/
+backend/build/
+backend/dist/
+
 # Vite
 .vite/
 
