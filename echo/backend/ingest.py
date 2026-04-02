@@ -119,7 +119,11 @@ def ingest_file(path: Path, collection: chromadb.Collection) -> int:
     embeddings = embed(chunks)
 
     ids = [doc_id(path, i) for i in range(len(chunks))]
-    metadatas = [{"source": str(path), "filename": path.name, "chunk": i} for i in range(len(chunks))]
+    mtime = path.stat().st_mtime
+    metadatas = [
+        {"source": str(path), "filename": path.name, "chunk": i, "mtime": mtime}
+        for i in range(len(chunks))
+    ]
 
     # Upsert so re-ingesting a file updates existing chunks
     collection.upsert(

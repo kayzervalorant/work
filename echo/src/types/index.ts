@@ -2,10 +2,10 @@
 // Documents & sources
 // ---------------------------------------------------------------------------
 
-/** Document source retourné par le backend avec son score de pertinence */
+/** Document source retourné par le backend avec son score de pertinence hybride */
 export interface SourceDoc {
   filename: string;
-  /** Score cosine [0-1] — plus proche de 1 = plus pertinent */
+  /** Score hybride [0-1] : cosinus × 0.8 + bonus récence + bonus nom fichier */
   score: number;
 }
 
@@ -66,6 +66,39 @@ export interface ModelStatus {
   connected: boolean;
   model: string;
   loading: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Ollama pre-flight
+// ---------------------------------------------------------------------------
+
+export interface OllamaStatus {
+  ollama_running: boolean;
+  model: string;
+  model_available: boolean;
+  available_models: string[];
+  error?: string;
+}
+
+/** Événement SSE renvoyé par /ollama/pull */
+export interface PullEvent {
+  status: string;
+  digest?: string;
+  total?: number;
+  completed?: number;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Notifications UI
+// ---------------------------------------------------------------------------
+
+export type ToastKind = "error" | "warning" | "success" | "info";
+
+export interface Toast {
+  id: string;
+  kind: ToastKind;
+  message: string;
 }
 
 // ---------------------------------------------------------------------------

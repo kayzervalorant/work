@@ -5,8 +5,6 @@ description = "Echo — Assistant IA local privacy-first"
 authors = []
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [build-dependencies]
 tauri-build = { version = "1.5", features = [] }
 
@@ -20,8 +18,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [features]
-# by default Tauri runs in production mode
-# when `tauri dev` runs it is executed with `cargo build --no-default-features`
-# the dev server is started with `npm run dev` and the `devPath` is set to the dev server URL
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# ---------------------------------------------------------------------------
+# Profil de release — optimisé pour taille et performance
+# ---------------------------------------------------------------------------
+[profile.release]
+# Optimisation maximale (temps de compilation plus long, binaire plus rapide)
+opt-level = 3
+# Link-time optimisation — réduit significativement la taille du binaire
+lto = true
+# Un seul "codegen unit" = meilleure LTO, binaire plus petit
+codegen-units = 1
+# Supprime les symboles de debug (non utiles en prod)
+strip = "symbols"
+# Panique → abort (pas de stack unwinding = binaire plus petit)
+panic = "abort"

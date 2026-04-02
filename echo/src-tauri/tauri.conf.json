@@ -24,7 +24,12 @@
       },
       "shell": {
         "all": false,
-        "open": false
+        "open": true,
+        "scope": [
+          { "name": "open-url", "cmd": "open", "args": true },
+          { "name": "xdg-open", "cmd": "xdg-open", "args": true },
+          { "name": "start", "cmd": "cmd", "args": ["/C", "start", { "validator": ".*" }] }
+        ]
       }
     },
     "bundle": {
@@ -37,10 +42,33 @@
         "icons/128x128@2x.png",
         "icons/icon.icns",
         "icons/icon.ico"
-      ]
+      ],
+      "shortDescription": "Assistant IA local privacy-first",
+      "longDescription": "Echo est un assistant IA entièrement local. Vos documents ne quittent jamais votre machine. Propulsé par Ollama et ChromaDB.",
+      "copyright": "Echo",
+      "category": "Productivity",
+      "windows": {
+        "wix": {
+          "language": "fr-FR"
+        },
+        "nsis": {
+          "languages": ["French"],
+          "installMode": "currentUser"
+        }
+      },
+      "macOS": {
+        "minimumSystemVersion": "10.15",
+        "signingIdentity": null,
+        "entitlements": null
+      },
+      "linux": {
+        "deb": {
+          "depends": []
+        }
+      }
     },
     "security": {
-      "csp": "default-src 'self' tauri: asset:; connect-src 'self' http://localhost:8000; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:"
+      "csp": "default-src 'self' tauri: asset:; connect-src 'self' http://localhost:8000 http://localhost:11434; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
     },
     "updater": {
       "active": false
@@ -57,7 +85,8 @@
         "decorations": true,
         "transparent": false,
         "theme": "Dark",
-        "center": true
+        "center": true,
+        "fileDropEnabled": true
       }
     ]
   }

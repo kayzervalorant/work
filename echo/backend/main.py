@@ -2,15 +2,17 @@
 main.py — Serveur FastAPI exposant l'API à Tauri via HTTP local.
 """
 
+import json
 import logging
+import shutil
 import uuid
 from pathlib import Path
 
+import requests as _requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import json
 
 import config
 from ingest import get_collection, ingest_file, EXTRACTORS
@@ -26,7 +28,7 @@ app = FastAPI(title="Echo Backend", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
     allow_credentials=False,
 )
@@ -35,21 +37,13 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Suivi des jobs d'ingestion (in-memory, suffisant pour usage local mono-user)
 # ---------------------------------------------------------------------------
-
-# Structure d'un job :
-# {
-#   "id": str, "status": "pending"|"reading"|"embedding"|"finalizing"|"done"|"error",
-#   "current_file": str, "files_done": int, "files_total": int,
-#   "chunks_total": int, "error": str
-# }
 _jobs: dict[str, dict] = {}
 
 
 def _run_ingest(job_id: str, docs_dir: str) -> None:
     """
     Exécuté en arrière-plan par BackgroundTasks (thread séparé via starlette).
-    Met à jour _jobs[job_id] au fil de l'ingestion pour que le frontend puisse
-    interroger /ingest/status/{job_id} et afficher la progression.
+    Met à jour _jobs[job_id] au fil de l'ingestion.
     """
     job = _jobs[job_id]
     try:
@@ -69,14 +63,12 @@ def _run_ingest(job_id: str, docs_dir: str) -> None:
 
         for i, file in enumerate(files):
             job["current_file"] = file.name
-            # Après le premier fichier, on est en phase d'embedding
             if i > 0:
                 job["status"] = "embedding"
             try:
                 n = ingest_file(file, collection)
                 total_chunks += n
             except Exception as file_err:
-                # Fichier corrompu ou illisible → on log et on continue
                 log.warning("Fichier ignoré (%s) : %s", file.name, file_err)
                 n = 0
 
@@ -100,8 +92,6 @@ def _run_ingest(job_id: str, docs_dir: str) -> None:
 class QuestionRequest(BaseModel):
     question: str
     stream: bool = False
-    # Historique de la conversation — [{role: "user"|"assistant", content: str}]
-    # Le frontend envoie les 10 derniers messages pour le contexte de suivi.
     history: list[dict] = []
 
 
@@ -110,15 +100,12 @@ class IngestRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoints — Ingestion
 # ---------------------------------------------------------------------------
 
 @app.post("/ingest")
 async def ingest(req: IngestRequest, background_tasks: BackgroundTasks):
-    """
-    Lance l'ingestion en arrière-plan et retourne immédiatement un job_id.
-    Le frontend interroge /ingest/status/{job_id} pour suivre la progression.
-    """
+    """Lance l'ingestion en arrière-plan et retourne immédiatement un job_id."""
     job_id = uuid.uuid4().hex[:8]
     _jobs[job_id] = {
         "id": job_id,
@@ -141,6 +128,10 @@ def ingest_status(job_id: str):
     return _jobs[job_id]
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — Ask (RAG)
+# ---------------------------------------------------------------------------
+
 @app.post("/ask")
 def ask(req: QuestionRequest):
     """
@@ -150,9 +141,6 @@ def ask(req: QuestionRequest):
       data: {"source_docs": [{"filename": str, "score": float}, ...]}
       data: {"token": str}   ← répété N fois
       data: [DONE]
-
-    Format JSON (stream=false) :
-      {"response": str, "source_docs": [...]}
     """
     if req.stream:
         response_gen, source_docs = answer(
@@ -181,6 +169,110 @@ def ask(req: QuestionRequest):
     return {"response": response, "source_docs": source_docs}
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — Health & Ollama
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": config.OLLAMA_MODEL}
+
+
+@app.get("/ollama/status")
+def ollama_status():
+    """
+    Vérifie si Ollama est en ligne et si le modèle configuré est disponible.
+
+    Retourne :
+      { ollama_running: bool, model: str, model_available: bool,
+        available_models: list[str], error?: str }
+    """
+    try:
+        r = _requests.get(f"{config.OLLAMA_BASE_URL}/api/tags", timeout=3)
+        r.raise_for_status()
+        tags = r.json()
+        models: list[str] = [m["name"] for m in tags.get("models", [])]
+        # Accepte "mistral" ou "mistral:latest" comme équivalents
+        model_available = any(
+            m == config.OLLAMA_MODEL or m.startswith(config.OLLAMA_MODEL + ":")
+            for m in models
+        )
+        return {
+            "ollama_running": True,
+            "model": config.OLLAMA_MODEL,
+            "model_available": model_available,
+            "available_models": models,
+        }
+    except Exception as exc:
+        return {
+            "ollama_running": False,
+            "model": config.OLLAMA_MODEL,
+            "model_available": False,
+            "available_models": [],
+            "error": str(exc),
+        }
+
+
+@app.post("/ollama/pull")
+def pull_model():
+    """
+    Télécharge le modèle configuré via l'API Ollama /api/pull avec progression SSE.
+
+    Format SSE :
+      data: {"status": str, "digest"?: str, "total"?: int, "completed"?: int}
+      data: [DONE]
+    """
+    def stream_pull():
+        try:
+            url = f"{config.OLLAMA_BASE_URL}/api/pull"
+            payload = {"name": config.OLLAMA_MODEL, "stream": True}
+            with _requests.post(url, json=payload, stream=True, timeout=3600) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        yield f"data: {json.dumps(data)}\n\n"
+                        if data.get("status") == "success":
+                            break
+                    except Exception:
+                        continue
+        except Exception as exc:
+            log.exception("Erreur lors du pull modèle")
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        stream_pull(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Settings / Privacy
+# ---------------------------------------------------------------------------
+
+@app.delete("/settings/reset")
+def reset_database():
+    """
+    Supprime proprement la base vectorielle ChromaDB et vide les jobs en mémoire.
+    Garantie de confidentialité : aucune donnée indexée ne subsiste après l'appel.
+    """
+    global _jobs
+    try:
+        chroma_path = Path(config.CHROMA_DIR)
+        if chroma_path.exists():
+            shutil.rmtree(chroma_path)
+            log.info("Base vectorielle supprimée : %s", config.CHROMA_DIR)
+        # Vide le registre des jobs en mémoire
+        _jobs = {}
+        return {"status": "ok", "message": "Base de données réinitialisée avec succès."}
+    except Exception as exc:
+        log.exception("Erreur lors du reset de la base")
+        raise HTTPException(status_code=500, detail=str(exc))

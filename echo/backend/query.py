@@ -1,10 +1,12 @@
 """
-query.py — Prend une question, récupère le contexte pertinent dans ChromaDB,
+query.py — Prend une question, récupère le contexte pertinent dans ChromaDB
+(Hybrid RAG : similarité cosinus + bonus récence + bonus nom de fichier),
 et envoie le tout à Ollama pour générer une réponse.
 """
 
 import json
 import logging
+import time
 from typing import Generator
 
 import requests
@@ -31,22 +33,64 @@ Question de l'utilisateur :
 
 
 # ---------------------------------------------------------------------------
-# Retrieval
+# Hybrid RAG — fonctions de scoring secondaires
+# ---------------------------------------------------------------------------
+
+def _recency_bonus(mtime: float | None, max_age_days: int = 365) -> float:
+    """
+    Retourne un bonus [0.0, 0.10] basé sur la fraîcheur du document.
+    Un document modifié aujourd'hui obtient +0.10, un document vieux d'un an ou plus : 0.
+    """
+    if mtime is None:
+        return 0.0
+    age_secs = time.time() - mtime
+    age_days = age_secs / 86_400
+    if age_days <= 0:
+        return 0.10
+    if age_days >= max_age_days:
+        return 0.0
+    return round(0.10 * (1.0 - age_days / max_age_days), 4)
+
+
+def _filename_bonus(filename: str, question: str) -> float:
+    """
+    Retourne un bonus [0.0, 0.10] si des mots significatifs de la question
+    apparaissent dans le nom de fichier (insensible à la casse, sans extension).
+    """
+    stem = filename.rsplit(".", 1)[0].lower().replace("_", " ").replace("-", " ")
+    tokens = [t.lower() for t in question.split() if len(t) > 3]
+    if not tokens:
+        return 0.0
+    matches = sum(1 for t in tokens if t in stem)
+    return round(0.10 * min(matches / len(tokens), 1.0), 4)
+
+
+# ---------------------------------------------------------------------------
+# Retrieval (Hybrid)
 # ---------------------------------------------------------------------------
 
 def retrieve(question: str, top_k: int = config.TOP_K) -> list[dict]:
-    """Cherche les chunks les plus proches de la question dans ChromaDB."""
+    """
+    Cherche les chunks les plus proches de la question dans ChromaDB,
+    puis re-classe selon un score hybride :
+      hybrid = cosine × 0.80 + recency_bonus + filename_bonus
+
+    Cela priorise les documents récents et ceux dont le nom correspond à la requête,
+    sans sacrifier la pertinence sémantique.
+    """
     collection = get_collection()
 
     if collection.count() == 0:
-        log.warning("ChromaDB est vide — lancez ingest.py d'abord.")
+        log.warning("ChromaDB est vide — lancez l'ingestion d'abord.")
         return []
 
     [question_embedding] = embed([question])
 
+    # On récupère top_k × 2 candidats pour laisser de la marge au re-ranking
+    n_candidates = min(top_k * 2, collection.count())
     results = collection.query(
         query_embeddings=[question_embedding],
-        n_results=min(top_k, collection.count()),
+        n_results=n_candidates,
         include=["documents", "metadatas", "distances"],
     )
 
@@ -56,9 +100,23 @@ def retrieve(question: str, top_k: int = config.TOP_K) -> list[dict]:
         results["metadatas"][0],
         results["distances"][0],
     ):
-        chunks.append({"text": doc, "source": meta.get("filename", "?"), "score": 1 - dist})
+        cosine_score = 1.0 - dist
+        mtime: float | None = meta.get("mtime")
+        recency = _recency_bonus(mtime)
+        fname_match = _filename_bonus(meta.get("filename", ""), question)
 
-    return chunks
+        hybrid_score = round(cosine_score * 0.80 + recency + fname_match, 4)
+
+        chunks.append({
+            "text": doc,
+            "source": meta.get("filename", "?"),
+            "score": hybrid_score,   # score exposé au frontend = hybrid
+            "cosine": round(cosine_score, 4),
+        })
+
+    # Re-tri par score hybride décroissant, on garde les top_k meilleurs
+    chunks.sort(key=lambda c: -c["score"])
+    return chunks[:top_k]
 
 
 def build_source_docs(chunks: list[dict]) -> list[dict]:
@@ -95,10 +153,7 @@ def ask_ollama_stream(
 ) -> Generator[str, None, None]:
     """
     Envoie le prompt à Ollama et yield les tokens au fur et à mesure.
-
-    history : liste de messages précédents au format Ollama
-              [{"role": "user"|"assistant", "content": str}, ...]
-              Limités aux 10 derniers messages pour éviter un context trop long.
+    history : liste de messages précédents [{role, content}], limités aux 10 derniers.
     """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if history:
@@ -145,8 +200,6 @@ def answer(
     Retourne :
       - stream=False : (str_réponse, list[source_docs])
       - stream=True  : (Generator[str], list[source_docs])
-
-    source_docs : [{"filename": str, "score": float}, ...]
     """
     chunks = retrieve(question)
 
