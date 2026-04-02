@@ -1,19 +1,36 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import Sidebar from "./components/Sidebar";
 import ChatWindow from "./components/ChatWindow";
 import MessageInput from "./components/MessageInput";
 import { askStream, checkHealth } from "./api/backend";
-import type { Message, IndexedFolder, ModelStatus } from "./types";
+import type {
+  Message,
+  IndexedFolder,
+  IngestJob,
+  ModelStatus,
+  OllamaHistoryMessage,
+} from "./types";
 
 let msgCounter = 0;
 function uid(): string {
   return `msg-${Date.now()}-${++msgCounter}`;
 }
 
+/** Prépare les N derniers messages pour l'historique Ollama (hors message courant). */
+function buildHistory(messages: Message[], maxPairs = 5): OllamaHistoryMessage[] {
+  // On prend les N dernières paires user/assistant (= 2*N messages)
+  const relevant = messages
+    .filter((m) => !m.streaming && !m.error && m.content)
+    .slice(-(maxPairs * 2));
+
+  return relevant.map((m) => ({ role: m.role, content: m.content }));
+}
+
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
   const [folders, setFolders] = useState<IndexedFolder[]>([]);
+  const [activeJob, setActiveJob] = useState<IngestJob | null>(null);
   const [modelStatus, setModelStatus] = useState<ModelStatus>({
     connected: false,
     model: "—",
@@ -22,7 +39,7 @@ export default function App() {
   const [isThinking, setIsThinking] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Vérification initiale + polling toutes les 10s
+  // Polling santé Ollama
   useEffect(() => {
     async function poll() {
       const { connected, model } = await checkHealth();
@@ -33,25 +50,31 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Historique calculé à partir des messages existants
+  const conversationHistory = useMemo(
+    () => buildHistory(messages),
+    [messages]
+  );
+
+  // -----------------------------------------------------------------------
+  // Envoi d'une question
+  // -----------------------------------------------------------------------
   const handleSend = useCallback(
     async (question: string) => {
       if (isThinking) return;
 
-      // Message utilisateur
       const userMsg: Message = {
         id: uid(),
         role: "user",
         content: question,
-        sources: [],
+        source_docs: [],
       };
-
-      // Placeholder message assistant (streaming)
       const assistantId = uid();
       const assistantMsg: Message = {
         id: assistantId,
         role: "assistant",
         content: "",
-        sources: [],
+        source_docs: [],
         streaming: true,
       };
 
@@ -64,20 +87,19 @@ export default function App() {
       try {
         await askStream(
           question,
-          (token) => {
+          conversationHistory,
+          (token) =>
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId ? { ...m, content: m.content + token } : m
               )
-            );
-          },
-          (sources) => {
+            ),
+          (sourceDocs) =>
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === assistantId ? { ...m, sources } : m
+                m.id === assistantId ? { ...m, source_docs: sourceDocs } : m
               )
-            );
-          },
+            ),
           () => {
             setMessages((prev) =>
               prev.map((m) =>
@@ -102,7 +124,7 @@ export default function App() {
         setIsThinking(false);
       }
     },
-    [isThinking]
+    [isThinking, conversationHistory]
   );
 
   const handleStop = useCallback(() => {
@@ -113,10 +135,23 @@ export default function App() {
     setIsThinking(false);
   }, []);
 
+  // -----------------------------------------------------------------------
+  // Nouvelle discussion
+  // -----------------------------------------------------------------------
+  const handleNewChat = useCallback(() => {
+    if (isThinking) handleStop();
+    setMessages([]);
+  }, [isThinking, handleStop]);
+
+  // -----------------------------------------------------------------------
+  // Gestion des dossiers
+  // -----------------------------------------------------------------------
   const handleFolderAdded = useCallback((folder: IndexedFolder) => {
     setFolders((prev) => {
       const exists = prev.some((f) => f.path === folder.path);
-      return exists ? prev : [...prev, folder];
+      return exists
+        ? prev.map((f) => (f.path === folder.path ? folder : f))
+        : [...prev, folder];
     });
   }, []);
 
@@ -127,8 +162,10 @@ export default function App() {
         open={sidebarOpen}
         onToggle={() => setSidebarOpen((v) => !v)}
         folders={folders}
+        activeJob={activeJob}
         modelStatus={modelStatus}
         onFolderAdded={handleFolderAdded}
+        onJobUpdate={setActiveJob}
       />
 
       {/* Zone principale */}
@@ -144,17 +181,36 @@ export default function App() {
               <IconMenu />
             </button>
           )}
+
           <span className="text-sm font-medium text-text-secondary">
             Conversation
           </span>
+
+          {/* Compteur de messages */}
           {messages.length > 0 && (
-            <button
-              onClick={() => setMessages([])}
-              className="ml-auto text-xs text-text-muted hover:text-text-secondary transition-colors"
-            >
-              Effacer
-            </button>
+            <span className="text-[11px] text-text-muted">
+              {Math.ceil(messages.length / 2)} échange{Math.ceil(messages.length / 2) > 1 ? "s" : ""}
+            </span>
           )}
+
+          {/* Bouton Nouvelle discussion */}
+          <div className="ml-auto flex items-center gap-2">
+            {messages.length > 0 && (
+              <button
+                onClick={handleNewChat}
+                className="
+                  flex items-center gap-1.5 px-3 py-1.5 rounded-lg
+                  text-xs text-text-secondary border border-border
+                  hover:text-text-primary hover:border-border hover:bg-surface-2
+                  transition-all duration-150
+                "
+                title="Effacer la conversation et démarrer une nouvelle discussion"
+              >
+                <IconNewChat />
+                Nouvelle discussion
+              </button>
+            )}
+          </div>
         </header>
 
         {/* Messages */}
@@ -172,12 +228,26 @@ export default function App() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Icons
+// ---------------------------------------------------------------------------
+
 function IconMenu() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <line x1="2" y1="4" x2="14" y2="4" />
       <line x1="2" y1="8" x2="14" y2="8" />
       <line x1="2" y1="12" x2="14" y2="12" />
+    </svg>
+  );
+}
+
+function IconNewChat() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+      <path d="M6 2H2a1 1 0 00-1 1v7a1 1 0 001 1h7a1 1 0 001-1V7" />
+      <line x1="9" y1="1" x2="9" y2="5" />
+      <line x1="7" y1="3" x2="11" y2="3" />
     </svg>
   );
 }

@@ -5,38 +5,18 @@
  * Toutes les requêtes restent sur localhost — zéro réseau externe.
  */
 
-// ---------------------------------------------------------------------------
-// Types partagés
-// ---------------------------------------------------------------------------
-
-export interface HealthResponse {
-  status: "ok";
-  model: string;
-}
-
-export interface IngestResponse {
-  status: "ok";
-  docs_dir: string;
-}
-
-/** Événement SSE reçu pendant le streaming */
-export type StreamEvent =
-  | { sources: string[]; token?: never }
-  | { token: string; sources?: never };
-
-export interface AskSyncResponse {
-  response: string;
-  sources: string[];
-}
+import type {
+  AskSyncResponse,
+  IngestJob,
+  IngestStartResponse,
+  OllamaHistoryMessage,
+  SourceDoc,
+} from "../types";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-/**
- * Lit VITE_API_URL injecté par Vite au build.
- * Fallback sur localhost:8000 pour la compatibilité sans fichier .env.
- */
 const BASE_URL: string =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ??
   "http://localhost:8000";
@@ -49,14 +29,10 @@ function endpoint(path: string): string {
 // Sélection de dossier (Tauri natif ou fallback navigateur)
 // ---------------------------------------------------------------------------
 
-function isTauri(): boolean {
+export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI__" in window;
 }
 
-/**
- * Ouvre le sélecteur de dossier natif (Tauri) ou un prompt navigateur
- * en mode développement hors Tauri.
- */
 export async function selectFolder(): Promise<string | null> {
   if (isTauri()) {
     const { open } = await import("@tauri-apps/api/dialog");
@@ -71,23 +47,16 @@ export async function selectFolder(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// GET /health — statut Ollama
+// GET /health
 // ---------------------------------------------------------------------------
 
-/**
- * Vérifie que le backend et Ollama sont disponibles.
- * Timeout court (3 s) pour ne pas bloquer l'UI.
- */
-export async function checkHealth(): Promise<{
-  connected: boolean;
-  model: string;
-}> {
+export async function checkHealth(): Promise<{ connected: boolean; model: string }> {
   try {
     const res = await fetch(endpoint("/health"), {
       signal: AbortSignal.timeout(3_000),
     });
     if (!res.ok) return { connected: false, model: "—" };
-    const data: HealthResponse = await res.json();
+    const data = await res.json() as { status: string; model: string };
     return { connected: true, model: data.model };
   } catch {
     return { connected: false, model: "—" };
@@ -95,14 +64,10 @@ export async function checkHealth(): Promise<{
 }
 
 // ---------------------------------------------------------------------------
-// POST /ingest — indexation d'un dossier
+// POST /ingest — démarre l'ingestion asynchrone, retourne un job_id
 // ---------------------------------------------------------------------------
 
-/**
- * Déclenche l'ingestion d'un dossier côté backend.
- * Lance une exception avec le message d'erreur du backend si échec.
- */
-export async function ingestFolder(docsDir: string): Promise<IngestResponse> {
+export async function startIngest(docsDir: string): Promise<IngestStartResponse> {
   const res = await fetch(endpoint("/ingest"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -112,7 +77,22 @@ export async function ingestFolder(docsDir: string): Promise<IngestResponse> {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
     throw new Error((err as { detail?: string }).detail ?? `HTTP ${res.status}`);
   }
-  return res.json() as Promise<IngestResponse>;
+  return res.json() as Promise<IngestStartResponse>;
+}
+
+// ---------------------------------------------------------------------------
+// GET /ingest/status/{job_id} — état courant d'un job
+// ---------------------------------------------------------------------------
+
+export async function pollIngestStatus(jobId: string): Promise<IngestJob> {
+  const res = await fetch(endpoint(`/ingest/status/${jobId}`), {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error((err as { detail?: string }).detail ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<IngestJob>;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,30 +100,36 @@ export async function ingestFolder(docsDir: string): Promise<IngestResponse> {
 // ---------------------------------------------------------------------------
 
 /**
- * Envoie une question et lit la réponse token par token via Server-Sent Events.
+ * Événement SSE discriminé :
+ *   {"source_docs": [...]}  — premier événement, une seule fois
+ *   {"token": str}          — répété pour chaque token
+ */
+type StreamEvent =
+  | { source_docs: SourceDoc[]; token?: never }
+  | { token: string; source_docs?: never };
+
+/**
+ * Envoie une question et lit la réponse token par token.
  *
- * Séquence SSE émise par le backend :
- *   data: {"sources": ["file.pdf"]}   ← premier événement (liste des sources)
- *   data: {"token": "Bonjour"}        ← un événement par token
- *   data: [DONE]                      ← fin du stream
- *
- * @param question  - Question de l'utilisateur
- * @param onToken   - Appelé pour chaque nouveau token reçu
- * @param onSources - Appelé une fois avec la liste des fichiers sources
- * @param onDone    - Appelé quand le stream est terminé
- * @param signal    - AbortSignal pour interrompre la génération
+ * @param question   Question de l'utilisateur
+ * @param history    Historique Ollama (derniers N messages user/assistant)
+ * @param onToken    Appelé à chaque nouveau token
+ * @param onSources  Appelé une fois avec les documents sources + scores
+ * @param onDone     Appelé en fin de stream
+ * @param signal     AbortSignal pour interrompre la génération
  */
 export async function askStream(
   question: string,
+  history: OllamaHistoryMessage[],
   onToken: (token: string) => void,
-  onSources: (sources: string[]) => void,
+  onSources: (sourceDocs: SourceDoc[]) => void,
   onDone: () => void,
   signal?: AbortSignal
 ): Promise<void> {
   const res = await fetch(endpoint("/ask"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, stream: true }),
+    body: JSON.stringify({ question, stream: true, history }),
     signal,
   });
 
@@ -164,7 +150,6 @@ export async function askStream(
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      // Découpe sur les sauts de ligne SSE
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
@@ -181,11 +166,11 @@ export async function askStream(
         try {
           parsed = JSON.parse(raw) as StreamEvent;
         } catch {
-          continue; // ligne malformée — on ignore silencieusement
+          continue;
         }
 
-        if (parsed.sources) onSources(parsed.sources);
-        if (parsed.token)   onToken(parsed.token);
+        if (parsed.source_docs) onSources(parsed.source_docs);
+        if (parsed.token)       onToken(parsed.token);
       }
     }
   } finally {
@@ -199,15 +184,14 @@ export async function askStream(
 // POST /ask — mode non-streaming (fallback)
 // ---------------------------------------------------------------------------
 
-/**
- * Version synchrone : attend la réponse complète avant de retourner.
- * Utile si le streaming est désactivé ou non supporté.
- */
-export async function askSync(question: string): Promise<AskSyncResponse> {
+export async function askSync(
+  question: string,
+  history: OllamaHistoryMessage[]
+): Promise<AskSyncResponse> {
   const res = await fetch(endpoint("/ask"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, stream: false }),
+    body: JSON.stringify({ question, stream: false, history }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));

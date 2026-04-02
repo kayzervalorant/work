@@ -3,6 +3,7 @@ query.py — Prend une question, récupère le contexte pertinent dans ChromaDB,
 et envoie le tout à Ollama pour générer une réponse.
 """
 
+import json
 import logging
 from typing import Generator
 
@@ -60,6 +61,22 @@ def retrieve(question: str, top_k: int = config.TOP_K) -> list[dict]:
     return chunks
 
 
+def build_source_docs(chunks: list[dict]) -> list[dict]:
+    """
+    Déduplique les chunks par fichier source en gardant le score maximum.
+    Retourne une liste triée par pertinence décroissante.
+    """
+    best: dict[str, float] = {}
+    for c in chunks:
+        src = c["source"]
+        if src not in best or c["score"] > best[src]:
+            best[src] = c["score"]
+    return sorted(
+        [{"filename": src, "score": round(score, 3)} for src, score in best.items()],
+        key=lambda x: -x["score"],
+    )
+
+
 def build_prompt(question: str, chunks: list[dict]) -> str:
     context_parts = []
     for i, chunk in enumerate(chunks, 1):
@@ -72,16 +89,27 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
 # Génération via Ollama (streaming)
 # ---------------------------------------------------------------------------
 
-def ask_ollama_stream(prompt: str) -> Generator[str, None, None]:
-    """Envoie le prompt à Ollama et yield les tokens au fur et à mesure."""
+def ask_ollama_stream(
+    prompt: str,
+    history: list[dict] | None = None,
+) -> Generator[str, None, None]:
+    """
+    Envoie le prompt à Ollama et yield les tokens au fur et à mesure.
+
+    history : liste de messages précédents au format Ollama
+              [{"role": "user"|"assistant", "content": str}, ...]
+              Limités aux 10 derniers messages pour éviter un context trop long.
+    """
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history[-10:])
+    messages.append({"role": "user", "content": prompt})
+
     url = f"{config.OLLAMA_BASE_URL}/api/chat"
     payload = {
         "model": config.OLLAMA_MODEL,
         "stream": True,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
+        "messages": messages,
     }
 
     with requests.post(url, json=payload, stream=True, timeout=120) as resp:
@@ -89,7 +117,6 @@ def ask_ollama_stream(prompt: str) -> Generator[str, None, None]:
         for line in resp.iter_lines():
             if not line:
                 continue
-            import json
             data = json.loads(line)
             token = data.get("message", {}).get("content", "")
             if token:
@@ -98,20 +125,28 @@ def ask_ollama_stream(prompt: str) -> Generator[str, None, None]:
                 break
 
 
-def ask_ollama(prompt: str) -> str:
+def ask_ollama(prompt: str, history: list[dict] | None = None) -> str:
     """Version non-streaming — retourne la réponse complète."""
-    return "".join(ask_ollama_stream(prompt))
+    return "".join(ask_ollama_stream(prompt, history=history))
 
 
 # ---------------------------------------------------------------------------
 # Fonction principale
 # ---------------------------------------------------------------------------
 
-def answer(question: str, stream: bool = False):
+def answer(
+    question: str,
+    stream: bool = False,
+    history: list[dict] | None = None,
+) -> tuple:
     """
     Point d'entrée principal.
-    - stream=False : retourne (str_réponse, list[sources])
-    - stream=True  : retourne (Generator[str], list[sources])
+
+    Retourne :
+      - stream=False : (str_réponse, list[source_docs])
+      - stream=True  : (Generator[str], list[source_docs])
+
+    source_docs : [{"filename": str, "score": float}, ...]
     """
     chunks = retrieve(question)
 
@@ -120,17 +155,17 @@ def answer(question: str, stream: bool = False):
         return (msg, [])
 
     prompt = build_prompt(question, chunks)
-    sources = list({c["source"] for c in chunks})
+    source_docs = build_source_docs(chunks)
 
     if stream:
-        return (ask_ollama_stream(prompt), sources)
+        return (ask_ollama_stream(prompt, history=history), source_docs)
     else:
-        return (ask_ollama(prompt), sources)
+        return (ask_ollama(prompt, history=history), source_docs)
 
 
 if __name__ == "__main__":
     import sys
     question = " ".join(sys.argv[1:]) or "Que contiennent mes documents ?"
-    response, sources = answer(question)
-    print(f"\nSources : {', '.join(sources)}\n")
+    response, source_docs = answer(question)
+    print(f"\nSources : {', '.join(d['filename'] for d in source_docs)}\n")
     print(response)

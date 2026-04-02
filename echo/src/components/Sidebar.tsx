@@ -1,41 +1,101 @@
-import { useState } from "react";
-import { selectFolder, ingestFolder } from "../api/backend";
-import type { IndexedFolder, ModelStatus } from "../types";
+import { useEffect, useRef } from "react";
+import DropZone from "./DropZone";
+import IngestProgress from "./IngestProgress";
+import { startIngest, pollIngestStatus } from "../api/backend";
+import type { IndexedFolder, IngestJob, ModelStatus } from "../types";
 
 interface SidebarProps {
   open: boolean;
   onToggle: () => void;
   folders: IndexedFolder[];
+  activeJob: IngestJob | null;
   modelStatus: ModelStatus;
   onFolderAdded: (folder: IndexedFolder) => void;
+  onJobUpdate: (job: IngestJob | null) => void;
 }
+
+const POLL_INTERVAL_MS = 800;
 
 export default function Sidebar({
   open,
   onToggle,
   folders,
+  activeJob,
   modelStatus,
   onFolderAdded,
+  onJobUpdate,
 }: SidebarProps) {
-  const [ingestingPath, setIngestingPath] = useState<string | null>(null);
-  const [ingestError, setIngestError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  async function handleAddFolder() {
-    setIngestError(null);
-    const path = await selectFolder();
-    if (!path) return;
-
-    const name = path.split(/[\\/]/).pop() ?? path;
-    setIngestingPath(path);
-    try {
-      await ingestFolder(path);
-      onFolderAdded({ path, name });
-    } catch (err) {
-      setIngestError(err instanceof Error ? err.message : "Erreur d'ingestion.");
-    } finally {
-      setIngestingPath(null);
+  // Arrête le polling quand le job est terminé
+  useEffect(() => {
+    if (!activeJob) return;
+    if (activeJob.status === "done" || activeJob.status === "error") {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
     }
+  }, [activeJob]);
+
+  // Nettoyage au démontage
+  useEffect(() => () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+  }, []);
+
+  async function handleFolderSelected(path: string) {
+    const name = path.split(/[\\/]/).pop() ?? path;
+
+    // Démarre le job asynchrone
+    let resp;
+    try {
+      resp = await startIngest(path);
+    } catch (err) {
+      onJobUpdate({
+        id: "err",
+        status: "error",
+        current_file: "",
+        files_done: 0,
+        files_total: 0,
+        chunks_total: 0,
+        error: err instanceof Error ? err.message : "Erreur de démarrage.",
+      });
+      return;
+    }
+
+    onFolderAdded({ path, name, job_id: resp.job_id });
+
+    // Initialise l'état local du job
+    onJobUpdate({
+      id: resp.job_id,
+      status: "pending",
+      current_file: "",
+      files_done: 0,
+      files_total: 0,
+      chunks_total: 0,
+      error: "",
+    });
+
+    // Démarre le polling
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const updated = await pollIngestStatus(resp.job_id);
+        onJobUpdate(updated);
+        if (updated.status === "done" || updated.status === "error") {
+          clearInterval(pollRef.current!);
+          pollRef.current = null;
+        }
+      } catch {
+        // Polling failure silencieuse — on réessaiera au prochain tick
+      }
+    }, POLL_INTERVAL_MS);
   }
+
+  const isIngesting =
+    activeJob !== null &&
+    activeJob.status !== "done" &&
+    activeJob.status !== "error";
 
   return (
     <aside
@@ -45,7 +105,6 @@ export default function Sidebar({
         ${open ? "w-64" : "w-0"}
       `}
     >
-      {/* Inner wrapper — évite le clipping pendant l'animation */}
       <div className="flex flex-col w-64 h-full">
         {/* Logo + toggle */}
         <div className="flex items-center justify-between px-4 h-12 border-b border-border shrink-0">
@@ -64,10 +123,11 @@ export default function Sidebar({
           </button>
         </div>
 
-        {/* Sources de données */}
+        {/* Corps scrollable */}
         <div className="flex-1 overflow-y-auto px-3 py-4 space-y-4">
-          <section>
-            <div className="flex items-center justify-between mb-2 px-1">
+          {/* Section sources */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between px-1">
               <span className="text-[11px] font-semibold uppercase tracking-widest text-text-muted">
                 Sources de données
               </span>
@@ -77,57 +137,40 @@ export default function Sidebar({
               </span>
             </div>
 
-            {/* Bouton ajouter */}
-            <button
-              onClick={handleAddFolder}
-              disabled={!!ingestingPath}
-              className="
-                w-full flex items-center gap-2 px-3 py-2 rounded-lg
-                border border-dashed border-border text-text-secondary
-                hover:border-accent hover:text-accent hover:bg-accent/5
-                transition-all duration-200 text-sm
-                disabled:opacity-50 disabled:cursor-not-allowed
-              "
-            >
-              {ingestingPath ? (
-                <>
-                  <IconSpinner />
-                  <span className="truncate text-xs">Indexation…</span>
-                </>
-              ) : (
-                <>
-                  <IconPlus />
-                  <span>Ajouter un dossier</span>
-                </>
-              )}
-            </button>
+            {/* Drag & Drop zone */}
+            <DropZone
+              onFolderSelected={handleFolderSelected}
+              disabled={isIngesting}
+            />
 
-            {/* Erreur ingestion */}
-            {ingestError && (
-              <p className="mt-2 px-1 text-xs text-status-offline leading-relaxed">
-                {ingestError}
-              </p>
+            {/* Progression active */}
+            {activeJob && (
+              <IngestProgress job={activeJob} />
             )}
 
-            {/* Liste des dossiers */}
+            {/* Liste des dossiers indexés */}
             {folders.length > 0 && (
-              <ul className="mt-3 space-y-1">
+              <ul className="space-y-1 pt-1">
                 {folders.map((f) => (
-                  <FolderItem key={f.path} folder={f} active={ingestingPath === f.path} />
+                  <FolderItem
+                    key={f.path}
+                    folder={f}
+                    active={isIngesting && activeJob?.id === f.job_id}
+                  />
                 ))}
               </ul>
             )}
 
-            {folders.length === 0 && !ingestingPath && (
-              <p className="mt-4 px-1 text-xs text-text-muted leading-relaxed">
+            {folders.length === 0 && !activeJob && (
+              <p className="px-1 text-xs text-text-muted leading-relaxed">
                 Aucun dossier indexé.<br />
-                Ajoutez vos PDF et Markdown.
+                Glissez vos PDF et Markdown ci-dessus.
               </p>
             )}
           </section>
         </div>
 
-        {/* Statut modèle — pied de sidebar */}
+        {/* Pied — statut modèle */}
         <div className="px-4 py-3 border-t border-border shrink-0">
           <div className="flex items-center gap-2.5">
             <span
@@ -143,9 +186,7 @@ export default function Sidebar({
               `}
             />
             <div className="min-w-0">
-              <p className="text-[11px] text-text-muted leading-none mb-0.5">
-                Ollama
-              </p>
+              <p className="text-[11px] text-text-muted leading-none mb-0.5">Ollama</p>
               <p className="text-xs font-medium text-text-secondary truncate">
                 {modelStatus.loading
                   ? "Connexion…"
@@ -156,7 +197,6 @@ export default function Sidebar({
             </div>
           </div>
 
-          {/* Badge privacy */}
           <div className="mt-2.5 flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-surface-2">
             <IconShield />
             <span className="text-[10px] text-text-muted leading-tight">
@@ -173,7 +213,13 @@ export default function Sidebar({
 // Folder item
 // ---------------------------------------------------------------------------
 
-function FolderItem({ folder, active }: { folder: IndexedFolder; active: boolean }) {
+function FolderItem({
+  folder,
+  active,
+}: {
+  folder: IndexedFolder;
+  active: boolean;
+}) {
   return (
     <li
       className={`
@@ -183,16 +229,22 @@ function FolderItem({ folder, active }: { folder: IndexedFolder; active: boolean
       `}
     >
       <IconFolder className="shrink-0 text-accent/70" />
-      <span className="text-xs text-text-secondary truncate flex-1" title={folder.path}>
+      <span
+        className="text-xs text-text-secondary truncate flex-1"
+        title={folder.path}
+      >
         {folder.name}
       </span>
-      <IconLock size={11} className="shrink-0 text-text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
+      <IconLock
+        size={11}
+        className="shrink-0 text-text-muted opacity-0 group-hover:opacity-100 transition-opacity"
+      />
     </li>
   );
 }
 
 // ---------------------------------------------------------------------------
-// SVG Icons
+// Icons
 // ---------------------------------------------------------------------------
 
 function EchoLogo() {
@@ -209,15 +261,6 @@ function IconChevronLeft() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
       <polyline points="9,2 4,7 9,12" />
-    </svg>
-  );
-}
-
-function IconPlus() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-      <line x1="7" y1="2" x2="7" y2="12" />
-      <line x1="2" y1="7" x2="12" y2="7" />
     </svg>
   );
 }
@@ -243,23 +286,6 @@ function IconShield() {
   return (
     <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="#34d399" strokeWidth="1.2">
       <path d="M5.5 1L1.5 2.5V5c0 2.5 2 4 4 5 2-1 4-2.5 4-5V2.5L5.5 1z" />
-    </svg>
-  );
-}
-
-function IconSpinner() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      className="animate-spin"
-    >
-      <circle cx="7" cy="7" r="5.5" strokeOpacity="0.2" />
-      <path d="M7 1.5A5.5 5.5 0 0112.5 7" strokeLinecap="round" />
     </svg>
   );
 }

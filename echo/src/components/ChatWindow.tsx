@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import Markdown from "react-markdown";
-import type { Message } from "../types";
+import type { Message, SourceDoc } from "../types";
 
 interface ChatWindowProps {
   messages: Message[];
@@ -9,7 +9,6 @@ interface ChatWindowProps {
 export default function ChatWindow({ messages }: ChatWindowProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll vers le bas à chaque nouveau token
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -23,7 +22,7 @@ export default function ChatWindow({ messages }: ChatWindowProps) {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
+    <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6 selectable">
       {messages.map((msg) =>
         msg.role === "user" ? (
           <UserMessage key={msg.id} message={msg} />
@@ -44,13 +43,7 @@ function UserMessage({ message }: { message: Message }) {
   return (
     <div className="flex justify-end animate-fade-in">
       <div className="max-w-[75%] flex flex-col items-end gap-1">
-        <div
-          className="
-            px-4 py-2.5 rounded-2xl rounded-tr-sm
-            bg-accent/15 border border-accent/20
-            text-text-primary text-sm leading-relaxed
-          "
-        >
+        <div className="px-4 py-2.5 rounded-2xl rounded-tr-sm bg-accent/15 border border-accent/20 text-text-primary text-sm leading-relaxed">
           {message.content}
         </div>
         <span className="text-[10px] text-text-muted px-1">Vous</span>
@@ -68,7 +61,6 @@ function AssistantMessage({ message }: { message: Message }) {
 
   return (
     <div className="flex gap-3 animate-slide-up">
-      {/* Avatar */}
       <div className="shrink-0 w-7 h-7 rounded-full bg-surface-2 border border-border flex items-center justify-center mt-0.5">
         <EchoAvatarIcon />
       </div>
@@ -76,12 +68,9 @@ function AssistantMessage({ message }: { message: Message }) {
       <div className="flex-1 min-w-0 space-y-2">
         <span className="text-[10px] text-text-muted font-medium">Echo</span>
 
-        {/* Bulle de message */}
         <div
           className={`
-            px-4 py-3 rounded-2xl rounded-tl-sm
-            bg-surface-2 border
-            text-sm leading-relaxed
+            px-4 py-3 rounded-2xl rounded-tl-sm bg-surface-2 border text-sm leading-relaxed
             ${message.error
               ? "border-status-offline/30 text-status-offline"
               : "border-border text-text-primary"
@@ -89,22 +78,90 @@ function AssistantMessage({ message }: { message: Message }) {
           `}
         >
           {isEmpty ? (
-            /* Indicateur "en train de penser" */
             <ThinkingDots />
           ) : (
             <MarkdownContent content={message.content} />
           )}
-
-          {/* Curseur clignotant pendant le streaming */}
           {message.streaming && !isEmpty && (
             <span className="inline-block w-0.5 h-4 bg-accent ml-0.5 align-middle animate-blink" />
           )}
         </div>
 
-        {/* Tags sources */}
-        {message.sources.length > 0 && !message.streaming && (
-          <SourceTags sources={message.sources} />
+        {/* Cartes sources avec scores */}
+        {message.source_docs.length > 0 && !message.streaming && (
+          <SourceCards sourceDocs={message.source_docs} />
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Source cards avec score de pertinence
+// ---------------------------------------------------------------------------
+
+function SourceCards({ sourceDocs }: { sourceDocs: SourceDoc[] }) {
+  return (
+    <div className="space-y-1.5 pt-1 animate-fade-in">
+      <p className="text-[10px] text-text-muted px-0.5 uppercase tracking-wider font-medium">
+        Sources
+      </p>
+      <div className="flex flex-col gap-1.5">
+        {sourceDocs.map((doc) => (
+          <SourceCard key={doc.filename} doc={doc} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SourceCard({ doc }: { doc: SourceDoc }) {
+  const pct = Math.round(doc.score * 100);
+  const scoreColor =
+    pct >= 80
+      ? "text-status-online"
+      : pct >= 60
+      ? "text-accent"
+      : "text-status-loading";
+
+  return (
+    <div
+      className="
+        flex items-center gap-2.5 px-3 py-2
+        rounded-lg border border-border bg-surface-3
+        hover:border-accent/40 hover:bg-surface-3
+        transition-colors cursor-default group
+      "
+      title={`Score de pertinence : ${pct}%`}
+    >
+      {/* Icône fichier */}
+      <div className="shrink-0 text-text-muted group-hover:text-accent transition-colors">
+        <IconFile />
+      </div>
+
+      {/* Nom du fichier */}
+      <span className="flex-1 text-xs text-text-secondary truncate group-hover:text-text-primary transition-colors">
+        {doc.filename}
+      </span>
+
+      {/* Score + barre */}
+      <div className="flex items-center gap-2 shrink-0">
+        {/* Mini barre de score */}
+        <div className="w-12 h-1 rounded-full bg-surface-base overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${
+              pct >= 80
+                ? "bg-status-online"
+                : pct >= 60
+                ? "bg-accent"
+                : "bg-status-loading"
+            }`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <span className={`text-[10px] font-mono font-medium w-8 text-right ${scoreColor}`}>
+          {pct}%
+        </span>
       </div>
     </div>
   );
@@ -118,34 +175,18 @@ function MarkdownContent({ content }: { content: string }) {
   return (
     <Markdown
       components={{
-        // Paragraphes
-        p: ({ children }) => (
-          <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>
-        ),
-        // Titres
-        h1: ({ children }) => (
-          <h1 className="text-base font-semibold mb-2 text-text-primary">{children}</h1>
-        ),
-        h2: ({ children }) => (
-          <h2 className="text-sm font-semibold mb-1.5 text-text-primary">{children}</h2>
-        ),
-        h3: ({ children }) => (
-          <h3 className="text-sm font-medium mb-1 text-text-secondary">{children}</h3>
-        ),
-        // Listes
-        ul: ({ children }) => (
-          <ul className="list-none space-y-1 mb-2 pl-1">{children}</ul>
-        ),
-        ol: ({ children }) => (
-          <ol className="list-decimal list-inside space-y-1 mb-2 pl-1">{children}</ol>
-        ),
+        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+        h1: ({ children }) => <h1 className="text-base font-semibold mb-2 text-text-primary">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-sm font-semibold mb-1.5 text-text-primary">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-sm font-medium mb-1 text-text-secondary">{children}</h3>,
+        ul: ({ children }) => <ul className="list-none space-y-1 mb-2 pl-1">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal list-inside space-y-1 mb-2 pl-1">{children}</ol>,
         li: ({ children }) => (
           <li className="flex gap-2 text-sm leading-relaxed">
             <span className="text-accent mt-1.5 shrink-0">·</span>
             <span>{children}</span>
           </li>
         ),
-        // Code inline
         code: ({ children, className }) => {
           const isBlock = className?.startsWith("language-");
           if (isBlock) {
@@ -161,20 +202,10 @@ function MarkdownContent({ content }: { content: string }) {
             </code>
           );
         },
-        // Bloc pre > code
-        pre: ({ children }) => (
-          <pre className="my-2 rounded-md overflow-hidden">{children}</pre>
-        ),
-        // Gras / italique
-        strong: ({ children }) => (
-          <strong className="font-semibold text-text-primary">{children}</strong>
-        ),
-        em: ({ children }) => (
-          <em className="italic text-text-secondary">{children}</em>
-        ),
-        // Séparateur
+        pre: ({ children }) => <pre className="my-2 rounded-md overflow-hidden">{children}</pre>,
+        strong: ({ children }) => <strong className="font-semibold text-text-primary">{children}</strong>,
+        em: ({ children }) => <em className="italic text-text-secondary">{children}</em>,
         hr: () => <hr className="border-border my-3" />,
-        // Blockquote
         blockquote: ({ children }) => (
           <blockquote className="border-l-2 border-accent/40 pl-3 my-2 text-text-secondary italic">
             {children}
@@ -184,33 +215,6 @@ function MarkdownContent({ content }: { content: string }) {
     >
       {content}
     </Markdown>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Source tags
-// ---------------------------------------------------------------------------
-
-function SourceTags({ sources }: { sources: string[] }) {
-  return (
-    <div className="flex flex-wrap gap-1.5 pt-1">
-      {sources.map((src) => (
-        <span
-          key={src}
-          title={src}
-          className="
-            inline-flex items-center gap-1.5 px-2 py-1
-            rounded-md text-[11px] font-medium
-            bg-surface-3 border border-border
-            text-text-secondary hover:text-accent hover:border-accent/40
-            transition-colors cursor-default
-          "
-        >
-          <IconFile />
-          {src}
-        </span>
-      ))}
-    </div>
   );
 }
 
@@ -278,10 +282,10 @@ function EchoAvatarIcon() {
 
 function IconFile() {
   return (
-    <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.1">
-      <path d="M2 1h5l2 2v7H2V1z" />
-      <line x1="4" y1="5" x2="7" y2="5" />
-      <line x1="4" y1="7" x2="7" y2="7" />
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.2">
+      <path d="M2.5 1.5h5.5l2.5 2.5v7.5h-8V1.5z" />
+      <line x1="4.5" y1="6" x2="8.5" y2="6" />
+      <line x1="4.5" y1="8" x2="8.5" y2="8" />
     </svg>
   );
 }
