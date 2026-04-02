@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base ── */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background-color: #0d1117;
+    color: #e2e8f0;
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Désactiver la sélection parasite sur une app desktop */
+    user-select: none;
+  }
+
+  /* Permettre la sélection dans les zones de texte et messages */
+  textarea,
+  input,
+  .selectable {
+    user-select: text;
+  }
+
+  /* Scrollbar custom — discret, dark */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2d3a50;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3d4f6a;
+  }
+
+  /* Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2d3a50 transparent;
+  }
+}
+
+/* ── Prose markdown dans les messages ── */
+@layer components {
+  .prose-echo {
+    @apply text-sm text-text-primary leading-relaxed;
+  }
+
+  .prose-echo p {
+    @apply mb-2;
+  }
+  .prose-echo p:last-child {
+    @apply mb-0;
+  }
+
+  .prose-echo code {
+    @apply font-mono text-xs bg-surface-base border border-border rounded px-1.5 py-0.5 text-accent;
+  }
+
+  .prose-echo pre {
+    @apply bg-surface-base border border-border rounded-lg p-3 my-2 overflow-x-auto;
+  }
+
+  .prose-echo pre code {
+    @apply bg-transparent border-0 p-0 text-accent/90;
+  }
+}
+
+/* ── Tauri drag region ── */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
