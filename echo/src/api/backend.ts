@@ -58,6 +58,27 @@ export async function openExternalUrl(url: string): Promise<void> {
   }
 }
 
+/**
+ * Télécharge et installe Ollama automatiquement dans ~/Applications.
+ * Lance Ollama.app une fois l'installation terminée.
+ * Lève une erreur si l'installation échoue.
+ */
+export async function installOllamaAuto(): Promise<void> {
+  if (!isTauri()) throw new Error("Commande Tauri non disponible hors de l'app.");
+  const { invoke } = await import("@tauri-apps/api/tauri");
+  await invoke("install_ollama_auto");
+}
+
+/**
+ * Démarre Ollama s'il est déjà installé sur le système.
+ * Retourne `true` si Ollama a été trouvé et démarré, `false` sinon.
+ */
+export async function startOllamaIfInstalled(): Promise<boolean> {
+  if (!isTauri()) return false;
+  const { invoke } = await import("@tauri-apps/api/tauri");
+  return invoke<boolean>("start_ollama_if_installed");
+}
+
 // ---------------------------------------------------------------------------
 // GET /health
 // ---------------------------------------------------------------------------

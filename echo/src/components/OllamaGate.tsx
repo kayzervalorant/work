@@ -1,19 +1,30 @@
 /**
- * OllamaGate.tsx — Overlay plein écran affiché quand Ollama n'est pas prêt.
+ * OllamaGate.tsx — Overlay plein écran affiché au démarrage d'Echo.
  *
- * États gérés :
- *   1. "checking"    — vérification en cours au lancement
- *   2. "no_ollama"   — Ollama n'est pas installé / pas démarré
- *   3. "no_model"    — Ollama tourne mais le modèle n'est pas téléchargé
- *   4. "pulling"     — téléchargement du modèle en cours
- *   5. "ready"       — tout est OK → rend les children normalement
+ * Flux automatique :
+ *   1. "checking"      — vérification en cours
+ *   2. "backend_down"  — backend Echo pas encore prêt → auto-retry toutes les 2s
+ *   3. "no_ollama"     — Ollama absent → installation automatique disponible
+ *   4. "no_model"      — Ollama OK mais modèle absent → téléchargement auto proposé
+ *   5. "pulling"       — téléchargement du modèle en cours (SSE + barre %)
+ *   6. "ready"         — tout est OK → affiche l'app
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { checkOllamaStatus, pullModel, openExternalUrl } from "../api/backend";
+import {
+  checkOllamaStatus,
+  pullModel,
+  openExternalUrl,
+  installOllamaAuto,
+  startOllamaIfInstalled,
+} from "../api/backend";
 import type { OllamaStatus, PullEvent } from "../types";
 
 type GateState = "checking" | "backend_down" | "no_ollama" | "no_model" | "pulling" | "ready";
+type OllamaInstallState = "idle" | "installing" | "starting" | "error";
+
+const BACKEND_RETRY_INTERVAL_MS = 2_000;
+const BACKEND_MAX_RETRIES = 25; // ~50 secondes max
 
 interface OllamaGateProps {
   children: React.ReactNode;
@@ -24,7 +35,14 @@ export default function OllamaGate({ children }: OllamaGateProps) {
   const [ollamaInfo, setOllamaInfo] = useState<OllamaStatus | null>(null);
   const [pullProgress, setPullProgress] = useState<PullEvent | null>(null);
   const [pullError, setPullError] = useState<string | null>(null);
+  const [backendRetries, setBackendRetries] = useState(0);
+  const [installState, setInstallState] = useState<OllamaInstallState>("idle");
+  const [installError, setInstallError] = useState<string | null>(null);
   const pullAbortRef = useRef<AbortController | null>(null);
+
+  // ---------------------------------------------------------------------------
+  // Vérification de l'état Ollama + backend
+  // ---------------------------------------------------------------------------
 
   const check = useCallback(async () => {
     setState("checking");
@@ -42,10 +60,81 @@ export default function OllamaGate({ children }: OllamaGateProps) {
     }
   }, []);
 
-  // Vérification au montage
+  // Vérification initiale au montage
   useEffect(() => {
     check();
   }, [check]);
+
+  // ---------------------------------------------------------------------------
+  // Auto-retry quand le backend démarre (state: backend_down)
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (state !== "backend_down") {
+      setBackendRetries(0);
+      return;
+    }
+
+    if (backendRetries >= BACKEND_MAX_RETRIES) return; // arrête après timeout
+
+    const id = setTimeout(async () => {
+      setBackendRetries((n) => n + 1);
+      const status = await checkOllamaStatus();
+      setOllamaInfo(status);
+
+      if (status.error === "BACKEND_UNREACHABLE") {
+        setState("backend_down"); // reste ici → re-déclenche l'effet
+      } else if (!status.ollama_running) {
+        setState("no_ollama");
+      } else if (!status.model_available) {
+        setState("no_model");
+      } else {
+        setState("ready");
+      }
+    }, BACKEND_RETRY_INTERVAL_MS);
+
+    return () => clearTimeout(id);
+  }, [state, backendRetries]);
+
+  // ---------------------------------------------------------------------------
+  // Installation automatique d'Ollama
+  // ---------------------------------------------------------------------------
+
+  const handleInstallOllama = useCallback(async () => {
+    setInstallState("installing");
+    setInstallError(null);
+    try {
+      await installOllamaAuto();
+      setInstallState("starting");
+      // Attend qu'Ollama soit prêt (poll)
+      setTimeout(() => {
+        check();
+        setInstallState("idle");
+      }, 4_000);
+    } catch (err) {
+      setInstallError(err instanceof Error ? err.message : "Erreur d'installation.");
+      setInstallState("error");
+    }
+  }, [check]);
+
+  const handleStartOllama = useCallback(async () => {
+    setInstallState("starting");
+    setInstallError(null);
+    const found = await startOllamaIfInstalled();
+    if (found) {
+      setTimeout(() => {
+        check();
+        setInstallState("idle");
+      }, 3_000);
+    } else {
+      setInstallState("idle");
+      setState("no_ollama");
+    }
+  }, [check]);
+
+  // ---------------------------------------------------------------------------
+  // Téléchargement du modèle
+  // ---------------------------------------------------------------------------
 
   const handlePull = useCallback(async () => {
     setState("pulling");
@@ -66,8 +155,7 @@ export default function OllamaGate({ children }: OllamaGateProps) {
       );
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
-      const msg = err instanceof Error ? err.message : "Erreur lors du téléchargement.";
-      setPullError(msg);
+      setPullError(err instanceof Error ? err.message : "Erreur lors du téléchargement.");
       setState("no_model");
     }
   }, []);
@@ -78,9 +166,11 @@ export default function OllamaGate({ children }: OllamaGateProps) {
     setPullProgress(null);
   }, []);
 
-  if (state === "ready") {
-    return <>{children}</>;
-  }
+  // ---------------------------------------------------------------------------
+  // Rendu
+  // ---------------------------------------------------------------------------
+
+  if (state === "ready") return <>{children}</>;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-surface-base">
@@ -91,10 +181,25 @@ export default function OllamaGate({ children }: OllamaGateProps) {
         </div>
 
         {state === "checking" && <CheckingView />}
-        {state === "backend_down" && <BackendDownView onRetry={check} />}
-        {state === "no_ollama" && (
-          <NoOllamaView onRetry={check} />
+
+        {state === "backend_down" && (
+          <BackendStartingView
+            retries={backendRetries}
+            maxRetries={BACKEND_MAX_RETRIES}
+            onForceRetry={check}
+          />
         )}
+
+        {state === "no_ollama" && (
+          <NoOllamaView
+            installState={installState}
+            installError={installError}
+            onInstallAuto={handleInstallOllama}
+            onStartExisting={handleStartOllama}
+            onRetry={check}
+          />
+        )}
+
         {state === "no_model" && (
           <NoModelView
             modelName={ollamaInfo?.model ?? ""}
@@ -103,6 +208,7 @@ export default function OllamaGate({ children }: OllamaGateProps) {
             error={pullError}
           />
         )}
+
         {state === "pulling" && (
           <PullingView
             modelName={ollamaInfo?.model ?? ""}
@@ -116,7 +222,7 @@ export default function OllamaGate({ children }: OllamaGateProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Vues internes
+// Vue : checking
 // ---------------------------------------------------------------------------
 
 function CheckingView() {
@@ -124,125 +230,183 @@ function CheckingView() {
     <>
       <div>
         <h1 className="text-lg font-semibold text-text-primary">Démarrage d'Echo…</h1>
-        <p className="text-sm text-text-muted mt-1">Vérification d'Ollama en cours</p>
+        <p className="text-sm text-text-muted mt-1">Initialisation en cours</p>
       </div>
-      <div className="flex gap-1.5">
-        {[0, 1, 2].map((i) => (
-          <span
-            key={i}
-            className="w-2 h-2 rounded-full bg-accent/60 animate-bounce"
-            style={{ animationDelay: `${i * 150}ms` }}
-          />
-        ))}
-      </div>
+      <BounceDots />
     </>
   );
 }
 
-function BackendDownView({ onRetry }: { onRetry: () => void }) {
+// ---------------------------------------------------------------------------
+// Vue : backend_down → auto-retry avec spinner
+// ---------------------------------------------------------------------------
+
+function BackendStartingView({
+  retries,
+  maxRetries,
+  onForceRetry,
+}: {
+  retries: number;
+  maxRetries: number;
+  onForceRetry: () => void;
+}) {
+  const timedOut = retries >= maxRetries;
+
   return (
     <>
-      <div className="w-12 h-12 rounded-full bg-status-loading/10 border border-status-loading/30 flex items-center justify-center">
-        <IconSpinner />
-      </div>
+      {timedOut ? (
+        <div className="w-12 h-12 rounded-full bg-status-offline/10 border border-status-offline/30 flex items-center justify-center">
+          <IconOffline />
+        </div>
+      ) : (
+        <div className="w-12 h-12 rounded-full bg-status-loading/10 border border-status-loading/30 flex items-center justify-center">
+          <IconSpinner />
+        </div>
+      )}
 
       <div>
         <h1 className="text-lg font-semibold text-text-primary">
-          Serveur Echo non démarré
+          {timedOut ? "Serveur Echo non démarré" : "Démarrage du serveur Echo…"}
         </h1>
         <p className="text-sm text-text-muted mt-2 leading-relaxed max-w-sm">
-          Le backend local d'Echo (port 8000) n'est pas accessible.
-          En mode développement, tu dois le lancer manuellement.
+          {timedOut
+            ? "Le backend local (port 8000) n'a pas pu démarrer. Vérifiez qu'aucun autre processus n'occupe le port."
+            : "Le backend Python démarre automatiquement. Cela peut prendre quelques secondes la première fois (installation des dépendances)."}
         </p>
       </div>
 
-      <div className="w-full space-y-2 text-left bg-surface-2 border border-border rounded-xl p-4">
-        <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
-          Démarrer le backend (terminal)
-        </p>
-        <code className="block text-xs font-mono text-accent bg-surface-base rounded-lg px-3 py-2 leading-relaxed">
-          cd echo/backend<br />
-          pip install -r requirements.txt<br />
-          uvicorn main:app --port 8000 --reload
-        </code>
-        <p className="text-[11px] text-text-muted pt-1">
-          Dans l'app distribuée (.dmg), le serveur démarre automatiquement.
-        </p>
-      </div>
+      {!timedOut && (
+        <div className="flex items-center gap-3 text-xs text-text-muted">
+          <BounceDots />
+          <span>Tentative {retries + 1}/{maxRetries}</span>
+        </div>
+      )}
 
-      <button
-        onClick={onRetry}
-        className="
-          w-full px-4 py-2.5 rounded-lg
-          bg-accent text-surface-base font-semibold text-sm
-          hover:bg-accent-dim transition-colors
-        "
-      >
-        Réessayer la connexion
-      </button>
+      {timedOut && (
+        <>
+          <div className="w-full bg-surface-2 border border-border rounded-xl p-4 text-left space-y-2">
+            <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
+              Démarrage manuel (terminal)
+            </p>
+            <code className="block text-xs font-mono text-accent bg-surface-base rounded-lg px-3 py-2 leading-loose">
+              cd echo/backend<br />
+              python3 -m venv .venv-dev<br />
+              source .venv-dev/bin/activate<br />
+              pip install -r requirements.txt<br />
+              uvicorn main:app --port 8000
+            </code>
+          </div>
+          <button
+            onClick={onForceRetry}
+            className="w-full px-4 py-2.5 rounded-lg bg-accent text-surface-base font-semibold text-sm hover:bg-accent-dim transition-colors"
+          >
+            Réessayer la connexion
+          </button>
+        </>
+      )}
     </>
   );
 }
 
-function NoOllamaView({ onRetry }: { onRetry: () => void }) {
+// ---------------------------------------------------------------------------
+// Vue : no_ollama → installation automatique
+// ---------------------------------------------------------------------------
+
+function NoOllamaView({
+  installState,
+  installError,
+  onInstallAuto,
+  onStartExisting,
+  onRetry,
+}: {
+  installState: OllamaInstallState;
+  installError: string | null;
+  onInstallAuto: () => void;
+  onStartExisting: () => void;
+  onRetry: () => void;
+}) {
+  const isWorking = installState === "installing" || installState === "starting";
+
   return (
     <>
       <div className="w-12 h-12 rounded-full bg-status-offline/10 border border-status-offline/30 flex items-center justify-center">
-        <IconOffline />
+        {isWorking ? <IconSpinner /> : <IconOffline />}
       </div>
 
       <div>
         <h1 className="text-lg font-semibold text-text-primary">Ollama non détecté</h1>
         <p className="text-sm text-text-muted mt-2 leading-relaxed max-w-sm">
           Echo nécessite <strong className="text-text-secondary">Ollama</strong> pour faire
-          tourner le modèle de langage localement sur votre machine.
-          Aucune donnée ne quitte votre ordinateur.
+          tourner le modèle de langage localement. Aucune donnée ne quitte votre ordinateur.
         </p>
       </div>
 
-      <div className="w-full space-y-2.5 text-left bg-surface-2 border border-border rounded-xl p-4">
-        <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
-          Installation en 2 étapes
-        </p>
-        <ol className="space-y-2">
-          {[
-            { step: "1", text: "Téléchargez Ollama sur ollama.com" },
-            { step: "2", text: "Lancez l'application Ollama, puis revenez ici" },
-          ].map(({ step, text }) => (
-            <li key={step} className="flex items-start gap-3 text-sm text-text-secondary">
-              <span className="w-5 h-5 rounded-full bg-surface-3 border border-border flex items-center justify-center text-[10px] font-bold text-accent shrink-0 mt-0.5">
-                {step}
-              </span>
-              {text}
-            </li>
-          ))}
-        </ol>
-      </div>
+      {installError && (
+        <div className="w-full px-4 py-3 rounded-lg bg-status-offline/10 border border-status-offline/30 text-sm text-status-offline text-left">
+          {installError}
+        </div>
+      )}
 
-      <div className="flex flex-col gap-2 w-full">
-        <button
-          onClick={() => openExternalUrl("https://ollama.com/download")}
-          className="
-            w-full flex items-center justify-center gap-2
-            px-4 py-2.5 rounded-lg
-            bg-accent text-surface-base font-semibold text-sm
-            hover:bg-accent-dim transition-colors
-          "
-        >
-          <IconExternalLink />
-          Télécharger Ollama
-        </button>
-        <button
-          onClick={onRetry}
-          className="
-            w-full px-4 py-2 rounded-lg
-            border border-border text-text-secondary text-sm
-            hover:bg-surface-2 hover:text-text-primary transition-colors
-          "
-        >
-          Réessayer la détection
-        </button>
-      </div>
+      {isWorking ? (
+        <div className="flex flex-col items-center gap-3">
+          <BounceDots />
+          <p className="text-sm text-text-muted">
+            {installState === "installing"
+              ? "Téléchargement et installation d'Ollama… (~150 Mo)"
+              : "Démarrage d'Ollama…"}
+          </p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2 w-full">
+          {/* Bouton principal : installation automatique */}
+          <button
+            onClick={onInstallAuto}
+            className="
+              w-full flex items-center justify-center gap-2
+              px-4 py-2.5 rounded-lg
+              bg-accent text-surface-base font-semibold text-sm
+              hover:bg-accent-dim transition-colors
+            "
+          >
+            <IconDownload />
+            Installer Ollama automatiquement
+          </button>
+
+          {/* Ollama déjà installé mais pas démarré */}
+          <button
+            onClick={onStartExisting}
+            className="
+              w-full px-4 py-2 rounded-lg
+              border border-border text-text-secondary text-sm
+              hover:bg-surface-2 hover:text-text-primary transition-colors
+            "
+          >
+            Ollama est installé — le démarrer
+          </button>
+
+          {/* Fallback manuel */}
+          <button
+            onClick={() => openExternalUrl("https://ollama.com/download")}
+            className="
+              w-full flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg
+              text-text-muted text-xs hover:text-text-secondary transition-colors
+            "
+          >
+            <IconExternalLink />
+            Télécharger manuellement sur ollama.com
+          </button>
+
+          <button
+            onClick={onRetry}
+            className="
+              w-full px-4 py-1.5 rounded-lg
+              text-text-muted text-xs hover:text-text-secondary transition-colors
+            "
+          >
+            Vérifier à nouveau
+          </button>
+        </div>
+      )}
 
       <p className="text-[11px] text-text-muted flex items-center gap-1.5">
         <IconShield size={11} />
@@ -251,6 +415,10 @@ function NoOllamaView({ onRetry }: { onRetry: () => void }) {
     </>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Vue : no_model
+// ---------------------------------------------------------------------------
 
 function NoModelView({
   modelName,
@@ -274,8 +442,8 @@ function NoModelView({
           Modèle <code className="text-accent text-base font-mono">{modelName}</code> absent
         </h1>
         <p className="text-sm text-text-muted mt-2 leading-relaxed">
-          Ollama est bien installé, mais le modèle n'a pas encore été téléchargé.
-          Le téléchargement s'effectue une seule fois et reste sur votre machine.
+          Ollama est installé. Il faut télécharger le modèle une seule fois.
+          Il restera sur votre machine, sans connexion internet par la suite.
         </p>
       </div>
 
@@ -313,6 +481,10 @@ function NoModelView({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Vue : pulling
+// ---------------------------------------------------------------------------
+
 function PullingView({
   modelName,
   progress,
@@ -328,15 +500,9 @@ function PullingView({
       : null;
 
   const statusLabel = progress?.status ?? "Initialisation…";
-  const isDownloading =
-    progress?.total != null && progress?.completed != null;
-
-  const downloadedMb = progress?.completed
-    ? (progress.completed / 1_048_576).toFixed(0)
-    : null;
-  const totalMb = progress?.total
-    ? (progress.total / 1_048_576).toFixed(0)
-    : null;
+  const isDownloading = progress?.total != null && progress?.completed != null;
+  const downloadedMb = progress?.completed ? (progress.completed / 1_048_576).toFixed(0) : null;
+  const totalMb = progress?.total ? (progress.total / 1_048_576).toFixed(0) : null;
 
   return (
     <>
@@ -351,49 +517,51 @@ function PullingView({
       </div>
 
       <div className="w-full space-y-3">
-        {/* Barre de progression */}
         <div className="w-full h-2 bg-surface-3 rounded-full overflow-hidden">
           <div
             className="h-full bg-accent rounded-full transition-all duration-300"
             style={{ width: pct != null ? `${pct}%` : "0%" }}
           />
         </div>
-
-        {/* Infos */}
         <div className="flex items-center justify-between text-xs text-text-muted">
           <span className="truncate max-w-[200px]" title={statusLabel}>
             {statusLabel}
           </span>
           {isDownloading && downloadedMb && totalMb ? (
             <span className="font-mono shrink-0">
-              {downloadedMb} / {totalMb} Mo
-              {pct != null && ` — ${pct}%`}
+              {downloadedMb} / {totalMb} Mo{pct != null && ` — ${pct}%`}
             </span>
           ) : (
-            <span className="flex gap-1">
-              {[0, 1, 2].map((i) => (
-                <span
-                  key={i}
-                  className="w-1 h-1 rounded-full bg-accent/60 animate-bounce"
-                  style={{ animationDelay: `${i * 150}ms` }}
-                />
-              ))}
-            </span>
+            <BounceDots />
           )}
         </div>
       </div>
 
       <button
         onClick={onCancel}
-        className="
-          px-4 py-2 rounded-lg border border-border
-          text-text-secondary text-sm
-          hover:bg-surface-2 hover:text-text-primary transition-colors
-        "
+        className="px-4 py-2 rounded-lg border border-border text-text-secondary text-sm hover:bg-surface-2 hover:text-text-primary transition-colors"
       >
         Annuler
       </button>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Composants utilitaires
+// ---------------------------------------------------------------------------
+
+function BounceDots() {
+  return (
+    <div className="flex gap-1.5">
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="w-2 h-2 rounded-full bg-accent/60 animate-bounce"
+          style={{ animationDelay: `${i * 150}ms` }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -452,7 +620,7 @@ function IconDownload() {
 
 function IconExternalLink() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M6 2H2.5A1.5 1.5 0 001 3.5v8A1.5 1.5 0 002.5 13h8A1.5 1.5 0 0012 11.5V8" />
       <path d="M8 1h5v5" />
       <line x1="13" y1="1" x2="6" y2="8" />
