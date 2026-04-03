@@ -272,8 +272,15 @@ def answer(
     # Recherche locale (RAG)
     chunks = retrieve(question)
 
-    # Recherche web — ne transmet que la question (pas les fichiers)
-    web_results = web_search(question, max_results=4)
+    # Recherche web — uniquement si le RAG local est insuffisant.
+    # Si les documents locaux contiennent déjà une réponse pertinente
+    # (score hybride max ≥ 0.55), on évite un appel réseau inutile.
+    best_local_score = max((c["score"] for c in chunks), default=0.0)
+    if best_local_score >= 0.55:
+        web_results: list[dict] = []
+        log.info("RAG local suffisant (score=%.2f) — recherche web ignorée.", best_local_score)
+    else:
+        web_results = web_search(question, max_results=4)
 
     if not chunks and not web_results:
         # Ni documents indexés ni résultats web → réponse directe Ollama

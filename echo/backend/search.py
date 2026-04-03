@@ -16,14 +16,14 @@ def web_search(query: str, max_results: int = 4) -> list[dict]:
     Chaque résultat est un dict :
       { "title": str, "url": str, "body": str }
 
-    Retourne [] si duckduckgo_search n'est pas installé ou en cas d'erreur réseau.
+    Retourne [] si ddgs n'est pas installé ou en cas d'erreur réseau.
     """
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
         log.warning(
-            "duckduckgo-search non installé — recherche web désactivée. "
-            "Installez avec : pip install duckduckgo-search"
+            "ddgs non installé — recherche web désactivée. "
+            "Installez avec : pip install ddgs"
         )
         return []
 
