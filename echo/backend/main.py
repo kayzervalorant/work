@@ -119,7 +119,11 @@ def _run_ingest(job_id: str, docs_dir: str) -> None:
             try:
                 n = ingest_file(file, collection)
                 total_chunks += n
+            except RuntimeError:
+                # Erreur critique (modèle d'embedding manquant, etc.) — échoue le job entier
+                raise
             except Exception as file_err:
+                # Erreur par fichier (PDF corrompu, etc.) — fichier ignoré, on continue
                 log.warning("Fichier ignoré (%s) : %s", file.name, file_err)
                 n = 0
 

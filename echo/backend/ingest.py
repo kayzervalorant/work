@@ -102,6 +102,11 @@ def embed(texts: list[str]) -> list[list[float]]:
         json={"model": config.OLLAMA_EMBED_MODEL, "input": texts},
         timeout=120,
     )
+    if response.status_code == 404:
+        raise RuntimeError(
+            f"Modèle d'embedding '{config.OLLAMA_EMBED_MODEL}' introuvable dans Ollama. "
+            f"Installez-le avec : ollama pull {config.OLLAMA_EMBED_MODEL}"
+        )
     response.raise_for_status()
     return response.json()["embeddings"]
 

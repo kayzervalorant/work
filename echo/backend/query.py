@@ -212,8 +212,11 @@ def answer(
     chunks = retrieve(question)
 
     if not chunks:
-        msg = "Aucun document pertinent trouvé. Veuillez d'abord ingérer des fichiers."
-        return (msg, [])
+        # Aucun document indexé → réponse directe via Ollama sans contexte RAG
+        if stream:
+            return (ask_ollama_stream(question, history=history), [])
+        else:
+            return (ask_ollama(question, history=history), [])
 
     prompt = build_prompt(question, chunks)
     source_docs = build_source_docs(chunks)
