@@ -24,8 +24,9 @@ OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 TOP_K = 5               # number of chunks to retrieve
 
 # CORS — origines autorisées séparées par des virgules
+# tauri://localhost = WebView Tauri (app packagée ou dev)
 _raw_origins = os.getenv(
     "ECHO_CORS_ORIGINS",
-    "http://localhost:1420,http://localhost:5173",
+    "http://localhost:1420,http://localhost:5173,tauri://localhost",
 )
 CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]

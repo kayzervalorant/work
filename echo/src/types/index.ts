@@ -76,6 +76,8 @@ export interface OllamaStatus {
   ollama_running: boolean;
   model: string;
   model_available: boolean;
+  embed_model?: string;
+  embed_model_available?: boolean;
   available_models: string[];
   error?: string;
 }

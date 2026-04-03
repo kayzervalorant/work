@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import requests as _requests
@@ -20,7 +21,39 @@ from query import answer
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="Echo Backend", version="1.0.0")
+
+# ---------------------------------------------------------------------------
+# Démarrage — validation et réparation automatique de ChromaDB
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Au démarrage, ouvre ChromaDB pour vérifier son intégrité.
+    Si la base est corrompue (erreur zlib, SQLite, HNSW…), elle est supprimée
+    et recrée automatiquement — le backend ne crashe jamais sur une DB pourrie.
+    """
+    _repair_chromadb_if_needed()
+    yield  # l'app tourne ici
+
+
+def _repair_chromadb_if_needed() -> None:
+    try:
+        get_collection()
+        log.info("[echo] ChromaDB OK")
+    except Exception as exc:
+        log.warning("[echo] ChromaDB corrompue (%s) — réparation automatique…", exc)
+        chroma_path = Path(config.CHROMA_DIR)
+        if chroma_path.exists():
+            shutil.rmtree(chroma_path)
+        try:
+            get_collection()
+            log.info("[echo] ChromaDB réparée avec succès")
+        except Exception as exc2:
+            log.error("[echo] Impossible de réparer ChromaDB : %s", exc2)
+
+
+app = FastAPI(title="Echo Backend", version="1.0.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # CORS — autorise le frontend Tauri (:1420) et Vite dev (:5173)
@@ -231,15 +264,19 @@ def ollama_status():
         r.raise_for_status()
         tags = r.json()
         models: list[str] = [m["name"] for m in tags.get("models", [])]
-        # Accepte "mistral" ou "mistral:latest" comme équivalents
-        model_available = any(
-            m == config.OLLAMA_MODEL or m.startswith(config.OLLAMA_MODEL + ":")
-            for m in models
-        )
+
+        def _has_model(name: str) -> bool:
+            return any(m == name or m.startswith(name + ":") for m in models)
+
+        model_available = _has_model(config.OLLAMA_MODEL)
+        embed_model_available = _has_model(config.OLLAMA_EMBED_MODEL)
+
         return {
             "ollama_running": True,
             "model": config.OLLAMA_MODEL,
-            "model_available": model_available,
+            "model_available": model_available and embed_model_available,
+            "embed_model": config.OLLAMA_EMBED_MODEL,
+            "embed_model_available": embed_model_available,
             "available_models": models,
         }
     except Exception as exc:
@@ -262,24 +299,28 @@ def pull_model():
       data: [DONE]
     """
     def stream_pull():
-        try:
-            url = f"{config.OLLAMA_BASE_URL}/api/pull"
-            payload = {"name": config.OLLAMA_MODEL, "stream": True}
-            with _requests.post(url, json=payload, stream=True, timeout=3600) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        yield f"data: {json.dumps(data)}\n\n"
-                        if data.get("status") == "success":
-                            break
-                    except Exception:
-                        continue
-        except Exception as exc:
-            log.exception("Erreur lors du pull modèle")
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        # Télécharge le modèle chat ET le modèle d'embedding en séquence
+        for model_name in [config.OLLAMA_MODEL, config.OLLAMA_EMBED_MODEL]:
+            try:
+                url = f"{config.OLLAMA_BASE_URL}/api/pull"
+                payload = {"name": model_name, "stream": True}
+                with _requests.post(url, json=payload, stream=True, timeout=3600) as resp:
+                    resp.raise_for_status()
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            # Préfixe le statut avec le nom du modèle pour le frontend
+                            data.setdefault("model", model_name)
+                            yield f"data: {json.dumps(data)}\n\n"
+                            if data.get("status") == "success":
+                                break
+                        except Exception:
+                            continue
+            except Exception as exc:
+                log.error("Erreur pull %s : %s", model_name, exc)
+                yield f"data: {json.dumps({'error': str(exc), 'model': model_name})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(

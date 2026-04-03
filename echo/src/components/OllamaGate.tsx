@@ -439,11 +439,12 @@ function NoModelView({
 
       <div>
         <h1 className="text-lg font-semibold text-text-primary">
-          Modèle <code className="text-accent text-base font-mono">{modelName}</code> absent
+          Modèles requis non installés
         </h1>
         <p className="text-sm text-text-muted mt-2 leading-relaxed">
-          Ollama est installé. Il faut télécharger le modèle une seule fois.
-          Il restera sur votre machine, sans connexion internet par la suite.
+          Echo nécessite deux modèles Ollama : <code className="text-accent font-mono text-xs">{modelName}</code> (chat)
+          et <code className="text-accent font-mono text-xs">nomic-embed-text</code> (recherche dans vos documents).
+          Le téléchargement s'effectue une seule fois.
         </p>
       </div>
 
@@ -464,7 +465,7 @@ function NoModelView({
           "
         >
           <IconDownload />
-          Télécharger {modelName}
+          Installer les modèles requis
         </button>
         <button
           onClick={onRetry}
