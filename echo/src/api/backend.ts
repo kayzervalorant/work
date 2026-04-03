@@ -3,6 +3,8 @@
  * Toutes les requêtes restent sur http://localhost:8000 — zéro réseau externe.
  */
 
+import type { SourceDoc } from "../types";
+
 const BASE_URL = "http://localhost:8000";
 
 // ---------------------------------------------------------------------------
@@ -24,8 +26,17 @@ export async function selectFolder(): Promise<string | null> {
     });
     return typeof selected === "string" ? selected : null;
   }
-  // Fallback navigateur (dev sans Tauri)
   return window.prompt("Chemin du dossier à indexer :");
+}
+
+/** Ouvre une URL dans le navigateur système (Tauri shell.open ou window.open). */
+export async function openExternalUrl(url: string): Promise<void> {
+  if (isTauri()) {
+    const { open } = await import("@tauri-apps/api/shell");
+    await open(url);
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +77,7 @@ export async function ingestFolder(docsDir: string): Promise<void> {
 export async function askStream(
   question: string,
   onToken: (token: string) => void,
-  onSources: (sources: string[]) => void,
+  onSources: (sourceDocs: SourceDoc[]) => void,
   onDone: () => void,
   signal?: AbortSignal
 ): Promise<void> {
@@ -102,10 +113,12 @@ export async function askStream(
         return;
       }
       try {
-        const parsed = JSON.parse(raw);
-        if (parsed.sources) onSources(parsed.sources as string[]);
-        if (parsed.token) onToken(parsed.token as string);
-      } catch {
+        const parsed = JSON.parse(raw) as { source_docs?: SourceDoc[]; token?: string; error?: string };
+        if (parsed.error) throw new Error(parsed.error);
+        if (parsed.source_docs) onSources(parsed.source_docs);
+        if (parsed.token) onToken(parsed.token);
+      } catch (e) {
+        if (e instanceof Error) throw e;
         // ligne malformée — on ignore
       }
     }
@@ -118,7 +131,7 @@ export async function askStream(
 // Question — mode non-streaming (fallback)
 // ---------------------------------------------------------------------------
 
-export async function askSync(question: string): Promise<{ response: string; sources: string[] }> {
+export async function askSync(question: string): Promise<{ response: string; source_docs: SourceDoc[] }> {
   const res = await fetch(`${BASE_URL}/ask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

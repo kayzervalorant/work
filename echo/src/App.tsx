@@ -42,7 +42,7 @@ export default function App() {
         id: uid(),
         role: "user",
         content: question,
-        sources: [],
+        source_docs: [],
       };
 
       // Placeholder message assistant (streaming)
@@ -51,7 +51,7 @@ export default function App() {
         id: assistantId,
         role: "assistant",
         content: "",
-        sources: [],
+        source_docs: [],
         streaming: true,
       };
 
@@ -71,10 +71,10 @@ export default function App() {
               )
             );
           },
-          (sources) => {
+          (source_docs) => {
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === assistantId ? { ...m, sources } : m
+                m.id === assistantId ? { ...m, source_docs } : m
               )
             );
           },
