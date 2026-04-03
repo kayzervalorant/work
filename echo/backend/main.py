@@ -40,6 +40,24 @@ app.add_middleware(
 _jobs: dict[str, dict] = {}
 
 
+def _get_fresh_collection():
+    """
+    Retourne la collection ChromaDB.
+    Si la DB est corrompue (zlib, SQLite WAL, HNSW index), elle est
+    automatiquement supprimée et recrée — aucune intervention manuelle requise.
+    """
+    try:
+        return get_collection()
+    except Exception as exc:
+        log.warning(
+            "ChromaDB corrompue (%s) — réinitialisation automatique et reprise…", exc
+        )
+        chroma_path = Path(config.CHROMA_DIR)
+        if chroma_path.exists():
+            shutil.rmtree(chroma_path)
+        return get_collection()  # Si ça échoue encore, l'exception remonte normalement
+
+
 def _run_ingest(job_id: str, docs_dir: str) -> None:
     """
     Exécuté en arrière-plan par BackgroundTasks (thread séparé via starlette).
@@ -58,7 +76,7 @@ def _run_ingest(job_id: str, docs_dir: str) -> None:
         job["files_total"] = len(files)
         job["status"] = "reading"
 
-        collection = get_collection()
+        collection = _get_fresh_collection()
         total_chunks = 0
 
         for i, file in enumerate(files):
