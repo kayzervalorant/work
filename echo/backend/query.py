@@ -2,6 +2,7 @@
 query.py — Prend une question, récupère le contexte pertinent dans ChromaDB
 (Hybrid RAG : similarité cosinus + bonus récence + bonus nom de fichier),
 et envoie le tout à Ollama pour générer une réponse.
+Combine également des résultats de recherche web (DuckDuckGo).
 """
 
 import json
@@ -13,20 +14,39 @@ import requests
 
 import config
 from ingest import get_collection, embed
+from search import web_search
 
 log = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """Tu es Echo, un assistant de contexte ultra-local conçu pour garantir la confidentialité absolue des données de l'utilisateur.
-Ta mission est d'aider l'utilisateur en synthétisant et en analysant ses documents personnels et professionnels.
+SYSTEM_PROMPT = """Tu es Echo, un assistant intelligent qui combine tes connaissances avec des documents locaux privés et des résultats de recherche web pour offrir des réponses complètes.
 
-Règles strictes :
-- Tu dois baser tes réponses uniquement sur le contexte fourni, issu des documents locaux de l'utilisateur.
-- Si la réponse ne se trouve pas dans le contexte fourni, dis simplement : "Je ne trouve pas cette information dans vos documents locaux." N'invente jamais de faits (zéro hallucination).
-- Sois direct, concis et professionnel.
-- Cite toujours le nom du fichier source lorsque tu donnes une information."""
+Règles :
+- Utilise en priorité le contexte fourni (documents locaux et résultats web) pour construire ta réponse.
+- Si tu utilises une source web, mentionne son titre ou son URL.
+- Si tu utilises un document local, cite son nom de fichier.
+- Si aucun contexte pertinent n'est disponible, réponds à partir de tes connaissances générales en le précisant.
+- N'invente jamais de faits. Sois direct, concis et professionnel.
+- Les fichiers locaux de l'utilisateur restent sur sa machine — tu n'en envoies aucun vers l'extérieur."""
 
-PROMPT_TEMPLATE = """Contexte extrait des documents :
-{context}
+PROMPT_TEMPLATE_LOCAL_ONLY = """Contexte extrait des documents locaux :
+{local_context}
+
+Question de l'utilisateur :
+{question}"""
+
+PROMPT_TEMPLATE_WEB_ONLY = """Résultats de recherche web :
+{web_context}
+
+Question de l'utilisateur :
+{question}"""
+
+PROMPT_TEMPLATE_COMBINED = """Contexte extrait des documents locaux :
+{local_context}
+
+---
+
+Résultats de recherche web :
+{web_context}
 
 Question de l'utilisateur :
 {question}"""
@@ -130,7 +150,7 @@ def retrieve(question: str, top_k: int = config.TOP_K) -> list[dict]:
 def build_source_docs(chunks: list[dict]) -> list[dict]:
     """
     Déduplique les chunks par fichier source en gardant le score maximum.
-    Retourne une liste triée par pertinence décroissante.
+    Retourne une liste triée par pertinence décroissante (type="local").
     """
     best: dict[str, float] = {}
     for c in chunks:
@@ -138,17 +158,53 @@ def build_source_docs(chunks: list[dict]) -> list[dict]:
         if src not in best or c["score"] > best[src]:
             best[src] = c["score"]
     return sorted(
-        [{"filename": src, "score": round(score, 3)} for src, score in best.items()],
+        [{"filename": src, "score": round(score, 3), "type": "local"} for src, score in best.items()],
         key=lambda x: -x["score"],
     )
 
 
-def build_prompt(question: str, chunks: list[dict]) -> str:
-    context_parts = []
+def build_web_source_docs(web_results: list[dict]) -> list[dict]:
+    """Formate les résultats web en source_docs pour le frontend."""
+    return [
+        {
+            "filename": r["title"] or r["url"],
+            "url": r["url"],
+            "score": 0.0,
+            "type": "web",
+        }
+        for r in web_results
+        if r.get("url")
+    ]
+
+
+def build_prompt(question: str, chunks: list[dict], web_results: list[dict] | None = None) -> str:
+    local_parts = []
     for i, chunk in enumerate(chunks, 1):
-        context_parts.append(f"[{i}] Source : {chunk['source']}\n{chunk['text']}")
-    context = "\n\n---\n\n".join(context_parts)
-    return PROMPT_TEMPLATE.format(context=context, question=question)
+        local_parts.append(f"[{i}] Source : {chunk['source']}\n{chunk['text']}")
+    local_context = "\n\n---\n\n".join(local_parts)
+
+    web_parts = []
+    if web_results:
+        for i, r in enumerate(web_results, 1):
+            web_parts.append(f"[{i}] {r['title']} ({r['url']})\n{r['body']}")
+    web_context = "\n\n---\n\n".join(web_parts)
+
+    if local_context and web_context:
+        return PROMPT_TEMPLATE_COMBINED.format(
+            local_context=local_context,
+            web_context=web_context,
+            question=question,
+        )
+    elif web_context:
+        return PROMPT_TEMPLATE_WEB_ONLY.format(
+            web_context=web_context,
+            question=question,
+        )
+    else:
+        return PROMPT_TEMPLATE_LOCAL_ONLY.format(
+            local_context=local_context,
+            question=question,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -205,21 +261,31 @@ def answer(
     """
     Point d'entrée principal.
 
+    Combine le RAG local (ChromaDB) et la recherche web (DuckDuckGo).
+    Les fichiers locaux ne quittent jamais la machine — seule la question
+    est envoyée à DuckDuckGo pour récupérer du contexte web.
+
     Retourne :
       - stream=False : (str_réponse, list[source_docs])
       - stream=True  : (Generator[str], list[source_docs])
     """
+    # Recherche locale (RAG)
     chunks = retrieve(question)
 
-    if not chunks:
-        # Aucun document indexé → réponse directe via Ollama sans contexte RAG
+    # Recherche web — ne transmet que la question (pas les fichiers)
+    web_results = web_search(question, max_results=4)
+
+    if not chunks and not web_results:
+        # Ni documents indexés ni résultats web → réponse directe Ollama
         if stream:
             return (ask_ollama_stream(question, history=history), [])
         else:
             return (ask_ollama(question, history=history), [])
 
-    prompt = build_prompt(question, chunks)
-    source_docs = build_source_docs(chunks)
+    prompt = build_prompt(question, chunks, web_results)
+
+    # Combine les sources locales et web
+    source_docs = build_source_docs(chunks) + build_web_source_docs(web_results)
 
     if stream:
         return (ask_ollama_stream(prompt, history=history), source_docs)

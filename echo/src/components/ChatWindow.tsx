@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import type { Message, SourceDoc } from "../types";
+import { openExternalUrl } from "../api/backend";
 
 interface ChatWindowProps {
   messages: Message[];
@@ -97,25 +98,44 @@ function AssistantMessage({ message }: { message: Message }) {
 }
 
 // ---------------------------------------------------------------------------
-// Source cards avec score de pertinence
+// Source cards — locales et web
 // ---------------------------------------------------------------------------
 
 function SourceCards({ sourceDocs }: { sourceDocs: SourceDoc[] }) {
+  const localDocs = sourceDocs.filter((d) => d.type !== "web");
+  const webDocs = sourceDocs.filter((d) => d.type === "web");
+
   return (
-    <div className="space-y-1.5 pt-1 animate-fade-in">
-      <p className="text-[10px] text-text-muted px-0.5 uppercase tracking-wider font-medium">
-        Sources
-      </p>
-      <div className="flex flex-col gap-1.5">
-        {sourceDocs.map((doc) => (
-          <SourceCard key={doc.filename} doc={doc} />
-        ))}
-      </div>
+    <div className="space-y-2 pt-1 animate-fade-in">
+      {localDocs.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] text-text-muted px-0.5 uppercase tracking-wider font-medium">
+            Documents locaux
+          </p>
+          <div className="flex flex-col gap-1.5">
+            {localDocs.map((doc) => (
+              <LocalSourceCard key={doc.filename} doc={doc} />
+            ))}
+          </div>
+        </div>
+      )}
+      {webDocs.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] text-text-muted px-0.5 uppercase tracking-wider font-medium">
+            Sources web
+          </p>
+          <div className="flex flex-col gap-1.5">
+            {webDocs.map((doc) => (
+              <WebSourceCard key={doc.url ?? doc.filename} doc={doc} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function SourceCard({ doc }: { doc: SourceDoc }) {
+function LocalSourceCard({ doc }: { doc: SourceDoc }) {
   const pct = Math.round(doc.score * 100);
   const scoreColor =
     pct >= 80
@@ -129,24 +149,18 @@ function SourceCard({ doc }: { doc: SourceDoc }) {
       className="
         flex items-center gap-2.5 px-3 py-2
         rounded-lg border border-border bg-surface-3
-        hover:border-accent/40 hover:bg-surface-3
+        hover:border-accent/40
         transition-colors cursor-default group
       "
       title={`Score de pertinence : ${pct}%`}
     >
-      {/* Icône fichier */}
       <div className="shrink-0 text-text-muted group-hover:text-accent transition-colors">
         <IconFile />
       </div>
-
-      {/* Nom du fichier */}
       <span className="flex-1 text-xs text-text-secondary truncate group-hover:text-text-primary transition-colors">
         {doc.filename}
       </span>
-
-      {/* Score + barre */}
       <div className="flex items-center gap-2 shrink-0">
-        {/* Mini barre de score */}
         <div className="w-12 h-1 rounded-full bg-surface-base overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-500 ${
@@ -164,6 +178,36 @@ function SourceCard({ doc }: { doc: SourceDoc }) {
         </span>
       </div>
     </div>
+  );
+}
+
+function WebSourceCard({ doc }: { doc: SourceDoc }) {
+  function handleClick() {
+    if (doc.url) openExternalUrl(doc.url);
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      className="
+        flex items-center gap-2.5 px-3 py-2 w-full text-left
+        rounded-lg border border-border bg-surface-3
+        hover:border-blue-400/40
+        transition-colors cursor-pointer group
+      "
+      title={doc.url}
+    >
+      <div className="shrink-0 text-blue-400/70 group-hover:text-blue-400 transition-colors">
+        <IconGlobe />
+      </div>
+      <span className="flex-1 text-xs text-text-secondary truncate group-hover:text-text-primary transition-colors">
+        {doc.filename}
+      </span>
+      <div className="shrink-0 text-text-muted group-hover:text-blue-400 transition-colors">
+        <IconExternalLink />
+      </div>
+    </button>
   );
 }
 
@@ -235,8 +279,8 @@ function EmptyState() {
       <div>
         <p className="text-text-primary font-medium text-sm">Comment puis-je vous aider ?</p>
         <p className="text-text-muted text-xs mt-1.5 leading-relaxed">
-          Posez une question sur vos documents.<br />
-          Tout reste sur votre machine.
+          Posez une question sur vos documents ou sur n'importe quel sujet.<br />
+          Echo combine vos fichiers locaux et le web pour répondre.
         </p>
       </div>
       <div className="flex items-center justify-center gap-1.5 text-[11px] text-status-online">
@@ -286,6 +330,26 @@ function IconFile() {
       <path d="M2.5 1.5h5.5l2.5 2.5v7.5h-8V1.5z" />
       <line x1="4.5" y1="6" x2="8.5" y2="6" />
       <line x1="4.5" y1="8" x2="8.5" y2="8" />
+    </svg>
+  );
+}
+
+function IconGlobe() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.2">
+      <circle cx="6.5" cy="6.5" r="5" />
+      <ellipse cx="6.5" cy="6.5" rx="2.2" ry="5" />
+      <line x1="1.5" y1="6.5" x2="11.5" y2="6.5" />
+    </svg>
+  );
+}
+
+function IconExternalLink() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.2">
+      <path d="M4.5 2H2a.5.5 0 0 0-.5.5v6.5A.5.5 0 0 0 2 9.5h6.5A.5.5 0 0 0 9 9V6.5" />
+      <path d="M6 1.5h3.5V5" />
+      <line x1="9.5" y1="1.5" x2="5" y2="6" />
     </svg>
   );
 }
