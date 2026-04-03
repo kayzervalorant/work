@@ -140,18 +140,36 @@ def ask(req: QuestionRequest):
     Format SSE (stream=true) :
       data: {"source_docs": [{"filename": str, "score": float}, ...]}
       data: {"token": str}   ← répété N fois
+      data: {"error": str}   ← en cas d'erreur (ChromaDB corrompu, Ollama KO…)
       data: [DONE]
     """
     if req.stream:
-        response_gen, source_docs = answer(
-            req.question, stream=True, history=req.history or None
-        )
+        try:
+            response_gen, source_docs = answer(
+                req.question, stream=True, history=req.history or None
+            )
+        except Exception as exc:
+            # Erreur avant même de commencer le stream (ChromaDB, etc.)
+            def error_stream():
+                yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                error_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
 
         def event_stream():
-            yield f"data: {json.dumps({'source_docs': source_docs})}\n\n"
-            for token in response_gen:
-                yield f"data: {json.dumps({'token': token})}\n\n"
-            yield "data: [DONE]\n\n"
+            try:
+                yield f"data: {json.dumps({'source_docs': source_docs})}\n\n"
+                for token in response_gen:
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+            except Exception as stream_exc:
+                log.error("Erreur dans le stream de réponse : %s", stream_exc)
+                yield f"data: {json.dumps({'error': str(stream_exc)})}\n\n"
+            finally:
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(
             event_stream(),
@@ -163,9 +181,12 @@ def ask(req: QuestionRequest):
             },
         )
 
-    response, source_docs = answer(
-        req.question, stream=False, history=req.history or None
-    )
+    try:
+        response, source_docs = answer(
+            req.question, stream=False, history=req.history or None
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     return {"response": response, "source_docs": source_docs}
 
 

@@ -179,12 +179,16 @@ export async function pullModel(
         }
         try {
           const parsed = JSON.parse(raw) as PullEvent;
+          if ((parsed as Record<string, unknown>).error) {
+            throw new Error((parsed as Record<string, unknown>).error as string);
+          }
           onProgress(parsed);
           if (parsed.status === "success") {
             onDone();
             return;
           }
-        } catch {
+        } catch (e) {
+          if (e instanceof Error && !(e.message.startsWith("data:"))) throw e;
           continue;
         }
       }
@@ -296,12 +300,15 @@ export async function askStream(
           return;
         }
 
-        let parsed: StreamEvent;
+        let parsed: StreamEvent & { error?: string };
         try {
-          parsed = JSON.parse(raw) as StreamEvent;
+          parsed = JSON.parse(raw) as StreamEvent & { error?: string };
         } catch {
           continue;
         }
+
+        // Erreur renvoyée proprement par le backend (ChromaDB, Ollama, etc.)
+        if (parsed.error) throw new Error(parsed.error);
 
         if (parsed.source_docs) onSources(parsed.source_docs);
         if (parsed.token)       onToken(parsed.token);

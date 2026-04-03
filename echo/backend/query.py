@@ -78,45 +78,53 @@ def retrieve(question: str, top_k: int = config.TOP_K) -> list[dict]:
     Cela priorise les documents récents et ceux dont le nom correspond à la requête,
     sans sacrifier la pertinence sémantique.
     """
-    collection = get_collection()
+    try:
+        collection = get_collection()
 
-    if collection.count() == 0:
-        log.warning("ChromaDB est vide — lancez l'ingestion d'abord.")
-        return []
+        if collection.count() == 0:
+            log.warning("ChromaDB est vide — lancez l'ingestion d'abord.")
+            return []
 
-    [question_embedding] = embed([question])
+        [question_embedding] = embed([question])
 
-    # On récupère top_k × 2 candidats pour laisser de la marge au re-ranking
-    n_candidates = min(top_k * 2, collection.count())
-    results = collection.query(
-        query_embeddings=[question_embedding],
-        n_results=n_candidates,
-        include=["documents", "metadatas", "distances"],
-    )
+        # On récupère top_k × 2 candidats pour laisser de la marge au re-ranking
+        n_candidates = min(top_k * 2, collection.count())
+        results = collection.query(
+            query_embeddings=[question_embedding],
+            n_results=n_candidates,
+            include=["documents", "metadatas", "distances"],
+        )
 
-    chunks = []
-    for doc, meta, dist in zip(
-        results["documents"][0],
-        results["metadatas"][0],
-        results["distances"][0],
-    ):
-        cosine_score = 1.0 - dist
-        mtime: float | None = meta.get("mtime")
-        recency = _recency_bonus(mtime)
-        fname_match = _filename_bonus(meta.get("filename", ""), question)
+        chunks = []
+        for doc, meta, dist in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
+            cosine_score = 1.0 - dist
+            mtime: float | None = meta.get("mtime")
+            recency = _recency_bonus(mtime)
+            fname_match = _filename_bonus(meta.get("filename", ""), question)
 
-        hybrid_score = round(cosine_score * 0.80 + recency + fname_match, 4)
+            hybrid_score = round(cosine_score * 0.80 + recency + fname_match, 4)
 
-        chunks.append({
-            "text": doc,
-            "source": meta.get("filename", "?"),
-            "score": hybrid_score,   # score exposé au frontend = hybrid
-            "cosine": round(cosine_score, 4),
-        })
+            chunks.append({
+                "text": doc,
+                "source": meta.get("filename", "?"),
+                "score": hybrid_score,   # score exposé au frontend = hybrid
+                "cosine": round(cosine_score, 4),
+            })
 
-    # Re-tri par score hybride décroissant, on garde les top_k meilleurs
-    chunks.sort(key=lambda c: -c["score"])
-    return chunks[:top_k]
+        # Re-tri par score hybride décroissant, on garde les top_k meilleurs
+        chunks.sort(key=lambda c: -c["score"])
+        return chunks[:top_k]
+
+    except Exception as exc:
+        log.error("Erreur ChromaDB lors de la recherche : %s", exc)
+        raise RuntimeError(
+            f"La base de données est inaccessible ou corrompue. "
+            f"Utilisez le Nuclear Reset pour la réinitialiser. ({exc})"
+        ) from exc
 
 
 def build_source_docs(chunks: list[dict]) -> list[dict]:

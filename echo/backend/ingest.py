@@ -45,9 +45,18 @@ def extract_pdf(path: Path) -> str:
         log.warning("pypdf not installed — skipping %s", path.name)
         return ""
     text = []
-    reader = pypdf.PdfReader(str(path))
-    for page in reader.pages:
-        text.append(page.extract_text() or "")
+    try:
+        reader = pypdf.PdfReader(str(path))
+        for page in reader.pages:
+            try:
+                text.append(page.extract_text() or "")
+            except Exception as page_err:
+                # Ignore les pages avec compression corrompue (zlib -3, etc.)
+                log.warning("Page ignorée dans %s : %s", path.name, page_err)
+                continue
+    except Exception as pdf_err:
+        log.warning("PDF illisible, ignoré (%s) : %s", path.name, pdf_err)
+        return ""
     return "\n".join(text)
 
 
